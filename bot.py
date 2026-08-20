@@ -1,17 +1,34 @@
 #!/usr/bin/env python3
 """
-Qulay Bot — волонтёрский вывоз мусора (вариант "бот" для сравнения с Mini App)
-Использует ту же Firebase Realtime Database, что и qulay-pickup.html
+Qulay Bot — напарник к Mini App (app.html)
 
-Запуск:
-    pip install python-telegram-bot firebase-admin
-    python3 bot.py
+Работает с той же Firebase Realtime Database и той же схемой заявок,
+что и Mini App:
+    status: open -> taken -> arrived -> picked -> done  (или cancelled)
+    поля:   house, entrance, floor, flat, note, bags, when,
+            clientId, clientName, clientPhone,
+            volunteerId, volunteerName, volunteerPhone,
+            createdAt, takenAt, arrivedAt, pickedAt, doneAt
 
-Перед запуском заполни переменные ниже (BOT_TOKEN, SERVICE_ACCOUNT_PATH, DB_URL)
+Живая синхронизация в обе стороны через db.reference("orders").listen():
+  - Жилец создаёт заявку в Mini App  -> волонтёры "на связи" в боте получают пуш
+  - Волонтёр берёт заявку в боте      -> жилец в Mini App видит "волонтёр в пути"
+  - Жилец создаёт заявку в боте       -> волонтёры в Mini App видят её как обычно
+  - Волонтёр берёт заявку в Mini App  -> если жилец из Telegram, бот пришлёт ему статус
+
+Переменные окружения (уже настроены на Railway):
+    BOT_TOKEN, FIREBASE_DB_URL, FIREBASE_SERVICE_ACCOUNT_JSON
+
+requirements.txt должен содержать:
+    python-telegram-bot>=20.0
+    firebase-admin
 """
 
+import asyncio
+import json
 import logging
-import math
+import os
+import threading
 from datetime import datetime
 
 import firebase_admin
@@ -26,359 +43,364 @@ from telegram.ext import (
     ContextTypes, ConversationHandler, filters
 )
 
-import os
-import json
-
-# ============================================================
-# НАСТРОЙКИ — берутся из переменных окружения (безопасно для деплоя)
-# ============================================================
+# ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 DB_URL = os.environ["FIREBASE_DB_URL"]
-FIREBASE_CREDS_JSON = os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"]  # весь JSON-ключ одной строкой
+FIREBASE_CREDS_JSON = os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"]
 
-# ============================================================
-# FIREBASE INIT
-# ============================================================
-cred_dict = json.loads(FIREBASE_CREDS_JSON)
-cred = credentials.Certificate(cred_dict)
+cred = credentials.Certificate(json.loads(FIREBASE_CREDS_JSON))
 firebase_admin.initialize_app(cred, {"databaseURL": DB_URL})
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
 
-# Состояния диалога создания заявки
-HOUSE, ENTRANCE, FLOOR, FLAT, COMMENT, LOCATION = range(6)
+HOUSE, ENTRANCE, FLOOR, FLAT, NOTE, BAGS = range(6)
 
-# ============================================================
-# ХЕЛПЕРЫ
-# ============================================================
-def get_user(user_id: int):
-    return db.reference(f"users/{user_id}").get()
+BAG_OPTIONS = ["Один пакет", "Два-три пакета", "Крупный мусор", "Стекло / банки"]
 
-def set_role(user_id: int, name: str, role: str):
-    db.reference(f"users/{user_id}").update({
-        "name": name, "role": role, "updatedAt": int(datetime.now().timestamp() * 1000)
-    })
+STATUS_LABEL = {
+    "open": "🟡 Ищем волонтёра",
+    "taken": "🟢 Волонтёр в пути",
+    "arrived": "🚪 Волонтёр у двери",
+    "picked": "📦 Несёт до контейнера",
+    "done": "✅ Готово",
+    "cancelled": "❌ Отменена",
+}
 
-def distance_km(lat1, lng1, lat2, lng2):
-    R = 6371
-    dlat = math.radians(lat2 - lat1)
-    dlng = math.radians(lng2 - lng1)
-    a = (math.sin(dlat / 2) ** 2 +
-         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2)
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+# ================= ГЛОБАЛЬНОЕ СОСТОЯНИЕ =================
+main_loop = None            # event loop бота — заполняется в on_startup
+bot_app = None               # Application — заполняется в main()
+orders_cache = {}            # локальная копия /orders для отслеживания смены статусов
 
-def role_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Я оставляю заявку", callback_data="role_client")],
-        [InlineKeyboardButton("🚶 Я волонтёр", callback_data="role_volunteer")],
-    ])
+# ================= ХЕЛПЕРЫ =================
+def get_user(uid: str):
+    return db.reference(f"users/{uid}").get()
 
-def client_menu():
+def fmt_phone(raw: str) -> str:
+    d = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if d.startswith("998"):
+        d = d[3:]
+    d = d[:9]
+    out = "+998"
+    if d: out += " " + d[0:2]
+    if len(d) > 2: out += " " + d[2:5]
+    if len(d) > 5: out += " " + d[5:7]
+    if len(d) > 7: out += " " + d[7:9]
+    return out
+
+def full_name(user) -> str:
+    return " ".join(filter(None, [user.first_name, user.last_name])) or (user.username or "Без имени")
+
+def role_menu(role: str):
+    if role == "volunteer":
+        return ReplyKeyboardMarkup([
+            [KeyboardButton("🟢 Вы на связи")],
+            [KeyboardButton("🗺 Заявки рядом"), KeyboardButton("📦 Мои заявки")],
+        ], resize_keyboard=True)
     return ReplyKeyboardMarkup([
         [KeyboardButton("📦 Оставить заявку")],
         [KeyboardButton("📋 Мои заявки")],
     ], resize_keyboard=True)
 
-def volunteer_menu():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("🗺 Заявки рядом")],
-        [KeyboardButton("📦 Мои заявки"), KeyboardButton("🏆 Рейтинг")],
-    ], resize_keyboard=True)
+def order_text(o: dict) -> str:
+    lines = [f"Дом {o.get('house','—')}, кв. {o.get('flat','—')}"]
+    lines.append(f"Подъезд {o.get('entrance','—')}, этаж {o.get('floor','—')}")
+    if o.get("note"):
+        lines.append(f"💬 {o['note']}")
+    if o.get("bags"):
+        lines.append(f"🧺 {o['bags']}")
+    lines.append(STATUS_LABEL.get(o.get("status"), o.get("status", "")))
+    return "\n".join(lines)
 
-def status_label(status: str, volunteer_name: str = None):
-    return {
-        "open": "🟡 Ищем волонтёра",
-        "accepted": f"🟢 Принята: {volunteer_name or ''}",
-        "done": "✅ Выполнено",
-    }.get(status, status)
+def send_async(chat_id: int, text: str, **kwargs):
+    """Отправить сообщение из фонового потока Firebase-слушателя
+    (у него нет своего event loop, поэтому шлём через основной)."""
+    if not (main_loop and bot_app):
+        return
+    async def _send():
+        try:
+            await bot_app.bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        except Exception as e:
+            log.warning(f"send_async failed for {chat_id}: {e}")
+    asyncio.run_coroutine_threadsafe(_send(), main_loop)
 
-# ============================================================
-# СТАРТ / РЕГИСТРАЦИЯ ПО НОМЕРУ (роль определяется ссылкой, не выбором)
-# ============================================================
-def phone_request_keyboard():
+# ================= /start =================
+def phone_kb():
     return ReplyKeyboardMarkup(
         [[KeyboardButton("📱 Поделиться номером", request_contact=True)]],
         resize_keyboard=True, one_time_keyboard=True
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+    uid = str(update.effective_user.id)
     user = get_user(uid)
-
     if user and user.get("phone"):
-        role = user.get("role", "client")
-        menu = client_menu() if role == "client" else volunteer_menu()
-        await update.message.reply_text("С возвращением!", reply_markup=menu)
+        await update.message.reply_text(
+            f"С возвращением, {user.get('name','')}!",
+            reply_markup=role_menu(user.get("role", "client"))
+        )
         return
-
-    db.reference(f"users/{uid}/pendingRole").set("client")
+    # /start vol  -> регистрация волонтёром, иначе жилец
+    pending_role = "volunteer" if context.args and context.args[0] == "vol" else "client"
+    db.reference(f"users/{uid}/pendingRole").set(pending_role)
     await update.message.reply_text(
-        "Привет! Это пилот сервиса помощи с вывозом мусора.\n\nПоделитесь номером, чтобы продолжить:",
-        reply_markup=phone_request_keyboard()
+        "Привет! Это Qulay — вывоз мусора с помощью волонтёров.\n\n"
+        "Поделитесь номером, чтобы продолжить:",
+        reply_markup=phone_kb()
     )
 
 async def contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contact = update.message.contact
     user = update.effective_user
-    if contact.user_id != user.id:
+    if contact.user_id and contact.user_id != user.id:
         await update.message.reply_text("Пожалуйста, поделитесь именно своим номером.")
         return
-
-    pending = db.reference(f"users/{user.id}/pendingRole").get() or "client"
-    name = " ".join(filter(None, [user.first_name, user.last_name])) or user.username or "Без имени"
-
-    db.reference(f"users/{user.id}").update({
-        "name": name,
-        "role": pending,
-        "phone": contact.phone_number,
-        "verifiedAt": int(datetime.now().timestamp() * 1000),
+    uid = str(user.id)
+    pending = db.reference(f"users/{uid}/pendingRole").get() or "client"
+    name = full_name(user)
+    phone = fmt_phone(contact.phone_number)
+    db.reference(f"users/{uid}").update({
+        "name": name, "role": pending, "phone": phone,
+        "onair": False, "verifiedAt": int(datetime.now().timestamp() * 1000),
     })
-    db.reference(f"users/{user.id}/pendingRole").delete()
+    db.reference(f"users/{uid}/pendingRole").delete()
+    label = "Волонтёр" if pending == "volunteer" else "Жилец"
+    await update.message.reply_text(f"Готово, {name}! Роль: {label}", reply_markup=role_menu(pending))
 
-    menu = client_menu() if pending == "client" else volunteer_menu()
-    role_label = "Клиент" if pending == "client" else "Волонтёр"
-    await update.message.reply_text(f"Номер подтверждён ✓ Роль: {role_label}", reply_markup=menu)
-
-# ============================================================
-# КЛИЕНТ: СОЗДАНИЕ ЗАЯВКИ (ConversationHandler)
-# ============================================================
-async def new_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= ЖИЛЕЦ: НОВАЯ ЗАЯВКА =================
+async def new_order_start(update, context):
     context.user_data["order"] = {}
     await update.message.reply_text("Номер дома?", reply_markup=ReplyKeyboardRemove())
     return HOUSE
 
-async def get_house(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["order"]["house"] = update.message.text
+async def get_house(update, context):
+    context.user_data["order"]["house"] = update.message.text.strip()
     await update.message.reply_text("Подъезд?")
     return ENTRANCE
 
-async def get_entrance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["order"]["entrance"] = update.message.text
+async def get_entrance(update, context):
+    context.user_data["order"]["entrance"] = update.message.text.strip()
     await update.message.reply_text("Этаж?")
     return FLOOR
 
-async def get_floor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["order"]["floor"] = update.message.text
+async def get_floor(update, context):
+    context.user_data["order"]["floor"] = update.message.text.strip()
     await update.message.reply_text("Квартира?")
     return FLAT
 
-async def get_flat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["order"]["flat"] = update.message.text
-    await update.message.reply_text("Комментарий (например, код домофона). Если нет — отправьте «-»")
-    return COMMENT
+async def get_flat(update, context):
+    context.user_data["order"]["flat"] = update.message.text.strip()
+    await update.message.reply_text("Комментарий (например, код домофона). Если нет — «-»")
+    return NOTE
 
-async def get_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    context.user_data["order"]["comment"] = "" if text == "-" else text
+async def get_note(update, context):
+    text = update.message.text.strip()
+    context.user_data["order"]["note"] = "" if text == "-" else text
+    kb = ReplyKeyboardMarkup([[KeyboardButton(b)] for b in BAG_OPTIONS],
+                              resize_keyboard=True, one_time_keyboard=True)
+    await update.message.reply_text("Что выносим?", reply_markup=kb)
+    return BAGS
 
-    loc_btn = ReplyKeyboardMarkup(
-        [[KeyboardButton("📍 Отправить геолокацию", request_location=True)]],
-        resize_keyboard=True, one_time_keyboard=True
-    )
-    await update.message.reply_text(
-        "Отправьте геолокацию, чтобы волонтёру было проще найти вас:",
-        reply_markup=loc_btn
-    )
-    return LOCATION
-
-async def get_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def get_bags(update, context):
     order = context.user_data["order"]
-    if update.message.location:
-        order["lat"] = update.message.location.latitude
-        order["lng"] = update.message.location.longitude
-    else:
-        order["lat"] = None
-        order["lng"] = None
+    order["bags"] = update.message.text.strip()
 
     user = update.effective_user
+    uid = str(user.id)
+    profile = get_user(uid) or {}
     order.update({
-        "clientId": str(user.id),
-        "clientName": " ".join(filter(None, [user.first_name, user.last_name])) or "Без имени",
+        "clientId": uid,
+        "clientName": profile.get("name") or full_name(user),
+        "clientPhone": profile.get("phone", ""),
         "status": "open",
+        "when": "сейчас",
         "createdAt": int(datetime.now().timestamp() * 1000),
-        "volunteerId": None,
-        "volunteerName": None,
     })
     db.reference("orders").push(order)
-
-    await update.message.reply_text("Заявка создана ✅", reply_markup=client_menu())
+    await update.message.reply_text("Заявка отправлена волонтёрам ✅", reply_markup=role_menu("client"))
     context.user_data.pop("order", None)
     return ConversationHandler.END
 
-async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_conv(update, context):
     context.user_data.pop("order", None)
-    await update.message.reply_text("Отменено.", reply_markup=client_menu())
+    role = (get_user(str(update.effective_user.id)) or {}).get("role", "client")
+    await update.message.reply_text("Отменено.", reply_markup=role_menu(role))
     return ConversationHandler.END
 
-# ============================================================
-# КЛИЕНТ: МОИ ЗАЯВКИ
-# ============================================================
-async def my_orders_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def my_orders_client(update, context):
     uid = str(update.effective_user.id)
     orders = db.reference("orders").order_by_child("clientId").equal_to(uid).get() or {}
     if not orders:
         await update.message.reply_text("Пока нет заявок.")
         return
     entries = sorted(orders.items(), key=lambda kv: kv[1].get("createdAt", 0), reverse=True)
-    lines = []
-    for _id, o in entries[:15]:
-        lines.append(
-            f"Дом {o.get('house','—')}, кв. {o.get('flat','—')}\n"
-            f"{status_label(o.get('status'), o.get('volunteerName'))}"
-        )
-    await update.message.reply_text("\n\n".join(lines))
+    for _id, o in entries[:10]:
+        await update.message.reply_text(order_text(o))
 
-# ============================================================
-# ВОЛОНТЁР: ЗАЯВКИ РЯДОМ
-# ============================================================
-async def orders_nearby_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    loc_btn = ReplyKeyboardMarkup(
-        [[KeyboardButton("📍 Отправить моё местоположение", request_location=True)]],
-        resize_keyboard=True, one_time_keyboard=True
+# ================= ВОЛОНТЁР: НА СВЯЗИ =================
+async def toggle_onair(update, context):
+    uid = str(update.effective_user.id)
+    cur = (get_user(uid) or {}).get("onair", False)
+    db.reference(f"users/{uid}/onair").set(not cur)
+    await update.message.reply_text(
+        "Вы на связи 🟢 — пришлём уведомление о новой заявке" if not cur
+        else "Уведомления выключены 🔕",
+        reply_markup=role_menu("volunteer")
     )
-    await update.message.reply_text("Отправьте геолокацию, чтобы найти ближайшие заявки:", reply_markup=loc_btn)
 
-async def orders_nearby_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.location:
-        return
-    my_lat = update.message.location.latitude
-    my_lng = update.message.location.longitude
-    context.user_data["last_loc"] = (my_lat, my_lng)
-
+def open_orders():
     orders = db.reference("orders").order_by_child("status").equal_to("open").get() or {}
-    if not orders:
-        await update.message.reply_text("Открытых заявок сейчас нет.", reply_markup=volunteer_menu())
+    return sorted(orders.items(), key=lambda kv: kv[1].get("createdAt", 0), reverse=True)
+
+async def orders_nearby(update, context):
+    entries = open_orders()
+    if not entries:
+        await update.message.reply_text("Открытых заявок сейчас нет.")
         return
+    for oid, o in entries[:10]:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
+        await update.message.reply_text(order_text(o), reply_markup=kb)
 
-    entries = []
-    for oid, o in orders.items():
-        d = distance_km(my_lat, my_lng, o["lat"], o["lng"]) if o.get("lat") else 999
-        entries.append((d, oid, o))
-    entries.sort(key=lambda x: x[0])
-
-    await update.message.reply_text(f"Найдено заявок: {len(entries)}", reply_markup=volunteer_menu())
-    for d, oid, o in entries[:10]:
-        dist_txt = f"{d:.1f} км" if d < 999 else "расстояние неизвестно"
-        text = (
-            f"📍 Дом {o.get('house','—')}, подъезд {o.get('entrance','—')}, "
-            f"этаж {o.get('floor','—')}, кв. {o.get('flat','—')}\n"
-            f"Расстояние: {dist_txt}"
-        )
-        if o.get("comment"):
-            text += f"\n💬 {o['comment']}"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Принять заявку", callback_data=f"claim_{oid}")]])
-        await update.message.reply_text(text, reply_markup=kb)
-
-# ============================================================
-# ВОЛОНТЁР: ПРИНЯТЬ ЗАЯВКУ (транзакция — защита от гонки)
-# ============================================================
-async def claim_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= ВОЛОНТЁР: ВЗЯТЬ ЗАЯВКУ (транзакция — защита от гонки) =================
+async def take_order(update, context):
     query = update.callback_query
-    order_id = query.data.replace("claim_", "")
+    oid = query.data.replace("take_", "")
     user = query.from_user
-    vol_name = " ".join(filter(None, [user.first_name, user.last_name])) or "Волонтёр"
+    uid = str(user.id)
+    profile = get_user(uid) or {}
+    vol_name = profile.get("name") or full_name(user)
+    vol_phone = profile.get("phone", "")
 
-    ref = db.reference(f"orders/{order_id}")
+    ref = db.reference(f"orders/{oid}")
 
-    def txn(current):
-        if current and current.get("status") == "open":
-            current["status"] = "accepted"
-            current["volunteerId"] = str(user.id)
-            current["volunteerName"] = vol_name
-            current["acceptedAt"] = int(datetime.now().timestamp() * 1000)
-        return current
+    def txn(cur):
+        if not cur or cur.get("status") != "open":
+            return cur
+        cur["status"] = "taken"
+        cur["volunteerId"] = uid
+        cur["volunteerName"] = vol_name
+        cur["volunteerPhone"] = vol_phone
+        cur["takenAt"] = int(datetime.now().timestamp() * 1000)
+        return cur
 
     result = ref.transaction(txn)
-
-    if result and result.get("volunteerId") == str(user.id):
+    if result and result.get("volunteerId") == uid:
         await query.answer("Заявка ваша ✓")
-        lat, lng = result.get("lat"), result.get("lng")
-        maps_kb = None
-        if lat and lng:
-            maps_url = f"https://yandex.ru/maps/?rtext=~{lat},{lng}&rtt=pd"
-            maps_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗺 Маршрут в Яндекс.Картах", url=maps_url)],
-                [InlineKeyboardButton("✅ Отметить выполненной", callback_data=f"done_{order_id}")],
-            ])
-        else:
-            maps_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Отметить выполненной", callback_data=f"done_{order_id}")],
-            ])
-        await query.edit_message_text(
-            query.message.text + "\n\n🟢 Вы приняли эту заявку",
-            reply_markup=maps_kb
-        )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚪 Я на месте", callback_data=f"arrived_{oid}")]])
+        await query.edit_message_text(order_text(result), reply_markup=kb)
     else:
-        await query.answer("Кто-то опередил вас 😔", show_alert=True)
-        await query.edit_message_text(query.message.text + "\n\n❌ Уже занято другим волонтёром")
+        await query.answer("Заявку уже взял другой волонтёр", show_alert=True)
+        await query.edit_message_text(query.message.text + "\n\n❌ Уже занято")
 
-# ============================================================
-# ВОЛОНТЁР: ОТМЕТИТЬ ВЫПОЛНЕННОЙ
-# ============================================================
-async def mark_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def step_arrived(update, context):
     query = update.callback_query
-    order_id = query.data.replace("done_", "")
-    user_id = query.from_user.id
+    oid = query.data.replace("arrived_", "")
+    db.reference(f"orders/{oid}").update({"status": "arrived", "arrivedAt": int(datetime.now().timestamp()*1000)})
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📦 Пакет забрал", callback_data=f"picked_{oid}")]])
+    await query.answer()
+    await query.edit_message_text(order_text(db.reference(f"orders/{oid}").get()), reply_markup=kb)
 
-    db.reference(f"orders/{order_id}").update({
-        "status": "done", "doneAt": int(datetime.now().timestamp() * 1000)
-    })
+async def step_picked(update, context):
+    query = update.callback_query
+    oid = query.data.replace("picked_", "")
+    db.reference(f"orders/{oid}").update({"status": "picked", "pickedAt": int(datetime.now().timestamp()*1000)})
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Готово", callback_data=f"done_{oid}")]])
+    await query.answer()
+    await query.edit_message_text(order_text(db.reference(f"orders/{oid}").get()), reply_markup=kb)
 
-    ref = db.reference(f"users/{user_id}/completedCount")
-    ref.transaction(lambda c: (c or 0) + 1)
+async def step_done(update, context):
+    query = update.callback_query
+    oid = query.data.replace("done_", "")
+    uid = str(query.from_user.id)
+    db.reference(f"orders/{oid}").update({"status": "done", "doneAt": int(datetime.now().timestamp()*1000)})
+    db.reference(f"users/{uid}/completedCount").transaction(lambda c: (c or 0) + 1)
+    await query.answer("Готово ✓")
+    await query.edit_message_text(query.message.text + "\n\n✅ Заявка закрыта. Спасибо!")
 
-    await query.answer("Отмечено ✓")
-    await query.edit_message_text(query.message.text + "\n\n✅ Выполнено. Спасибо!")
-
-# ============================================================
-# ВОЛОНТЁР: МОИ ЗАЯВКИ
-# ============================================================
-async def my_orders_volunteer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def my_orders_volunteer(update, context):
     uid = str(update.effective_user.id)
     orders = db.reference("orders").order_by_child("volunteerId").equal_to(uid).get() or {}
     if not orders:
         await update.message.reply_text("Пока нет принятых заявок.")
         return
-    active = [(k, o) for k, o in orders.items() if o.get("status") == "accepted"]
-    done = [(k, o) for k, o in orders.items() if o.get("status") == "done"]
+    entries = sorted(orders.items(), key=lambda kv: kv[1].get("createdAt", 0), reverse=True)
+    for _id, o in entries[:10]:
+        await update.message.reply_text(order_text(o))
 
-    lines = ["🟢 Активные:"]
-    lines += [f"Дом {o['house']}, кв. {o['flat']}" for _, o in active] or ["— нет —"]
-    lines.append("\n✅ Выполненные:")
-    lines += [f"Дом {o['house']}, кв. {o['flat']}" for _, o in done] or ["— нет —"]
-    await update.message.reply_text("\n".join(lines))
+# ================= ЖИВАЯ СИНХРОНИЗАЦИЯ С Firebase (в обе стороны) =================
+def on_orders_change(event):
+    """Срабатывает на любое изменение в /orders — и из Mini App, и из бота.
+    Держит локальный кэш, чтобы понимать переход статуса, и рассылает
+    уведомления волонтёрам (новая заявка) и жильцам (смена статуса)."""
+    global orders_cache
+    path = event.path.strip("/")
 
-# ============================================================
-# РЕЙТИНГ
-# ============================================================
-async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users = db.reference("users").get() or {}
-    volunteers = [(u.get("name", "Волонтёр"), u.get("completedCount", 0))
-                  for u in users.values() if u.get("role") == "volunteer"]
-    volunteers.sort(key=lambda x: x[1], reverse=True)
-
-    if not volunteers:
-        await update.message.reply_text("Рейтинг пока пуст.")
+    if path == "":
+        orders_cache = event.data or {}
         return
 
-    lines = ["🏆 Топ волонтёров:\n"]
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (name, count) in enumerate(volunteers[:15]):
-        prefix = medals[i] if i < 3 else f"{i+1}."
-        lines.append(f"{prefix} {name} — {count} заявок")
-    await update.message.reply_text("\n".join(lines))
+    parts = path.split("/")
+    oid = parts[0]
+    before = orders_cache.get(oid)
+    before_status = before.get("status") if isinstance(before, dict) else None
 
-# ============================================================
-# MAIN
-# ============================================================
+    if event.data is None and len(parts) == 1:
+        orders_cache.pop(oid, None)
+        return
+
+    if len(parts) == 1:
+        orders_cache[oid] = event.data
+    else:
+        rec = orders_cache.setdefault(oid, {})
+        if isinstance(rec, dict):
+            rec[parts[1]] = event.data
+
+    after = orders_cache.get(oid)
+    if not isinstance(after, dict):
+        return
+
+    new_status = after.get("status")
+    if new_status == before_status:
+        return
+
+    if new_status == "open" and before_status is None:
+        # новая заявка -> уведомить волонтёров "на связи"
+        users = db.reference("users").get() or {}
+        for vid, u in users.items():
+            if u.get("role") == "volunteer" and u.get("onair"):
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
+                try:
+                    send_async(int(vid), "🔔 Новая заявка рядом\n\n" + order_text(after), reply_markup=kb)
+                except (ValueError, TypeError):
+                    pass  # заявка создана из Mini App, uid не telegram id
+
+    elif new_status in ("taken", "arrived", "picked", "done", "cancelled"):
+        client_id = after.get("clientId")
+        try:
+            send_async(int(client_id), STATUS_LABEL.get(new_status, new_status) + "\n" + order_text(after))
+        except (ValueError, TypeError):
+            pass  # жилец пришёл из Mini App, не из Telegram
+
+def start_firebase_listener():
+    def _run():
+        db.reference("orders").listen(on_orders_change)
+    threading.Thread(target=_run, daemon=True).start()
+
+# ================= MAIN =================
+async def on_startup(app: Application):
+    global main_loop
+    main_loop = asyncio.get_running_loop()
+    start_firebase_listener()
+    log.info("Firebase listener запущен")
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    global bot_app
+    app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
+    bot_app = app
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.CONTACT, contact_received))
 
-    # Создание заявки (клиент)
     conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^📦 Оставить заявку$"), new_order_start)],
         states={
@@ -386,23 +408,24 @@ def main():
             ENTRANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_entrance)],
             FLOOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_floor)],
             FLAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_flat)],
-            COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_comment)],
-            LOCATION: [MessageHandler(filters.LOCATION | filters.TEXT, get_location)],
+            NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_note)],
+            BAGS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_bags)],
         },
-        fallbacks=[CommandHandler("cancel", cancel_order)],
+        fallbacks=[CommandHandler("cancel", cancel_conv)],
     )
     app.add_handler(conv)
 
     app.add_handler(MessageHandler(filters.Regex("^📋 Мои заявки$"), my_orders_client))
-    app.add_handler(MessageHandler(filters.Regex("^🗺 Заявки рядом$"), orders_nearby_start))
-    app.add_handler(MessageHandler(filters.LOCATION, orders_nearby_result))
+    app.add_handler(MessageHandler(filters.Regex("^🟢 Вы на связи$"), toggle_onair))
+    app.add_handler(MessageHandler(filters.Regex("^🗺 Заявки рядом$"), orders_nearby))
     app.add_handler(MessageHandler(filters.Regex("^📦 Мои заявки$"), my_orders_volunteer))
-    app.add_handler(MessageHandler(filters.Regex("^🏆 Рейтинг$"), ranking))
 
-    app.add_handler(CallbackQueryHandler(claim_order, pattern="^claim_"))
-    app.add_handler(CallbackQueryHandler(mark_done, pattern="^done_"))
+    app.add_handler(CallbackQueryHandler(take_order, pattern="^take_"))
+    app.add_handler(CallbackQueryHandler(step_arrived, pattern="^arrived_"))
+    app.add_handler(CallbackQueryHandler(step_picked, pattern="^picked_"))
+    app.add_handler(CallbackQueryHandler(step_done, pattern="^done_"))
 
-    log.info("Бот запущен...")
+    log.info("Бот запускается...")
     app.run_polling()
 
 if __name__ == "__main__":
