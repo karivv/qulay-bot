@@ -227,9 +227,8 @@ async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     me_bot = await context.bot.get_me()
     link = f"https://t.me/{me_bot.username}?start=vol_{code}"
     await update.message.reply_text(
-        f"Код для нового волонтёра: {code}\n\n"
-        f"Отправьте кандидату эту ссылку (или просто код — его можно ввести и в приложении):\n{link}\n\n"
-        f"Код одноразовый: сработает только у того, кто введёт его первым."
+        f"Ссылка для нового волонтёра:\n{link}\n\n"
+        f"Одноразовая: сработает только у того, кто откроет её первым."
     )  # без parse_mode: ссылка вида ?start=vol_XXXXXX содержит "_", Markdown ломается на нём
 
 async def invites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -257,19 +256,35 @@ async def contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пожалуйста, поделитесь именно своим номером.")
         return
     uid = str(user.id)
-    pending = db.reference(f"users/{uid}/pendingRole").get() or "client"
-    name = full_name(user)
     phone = fmt_phone(contact.phone_number)
+    # регистрация завершится в name_received() — там же пишем phone в users/{uid}
+    db.reference(f"users/{uid}/pendingPhone").set(phone)
+    await update.message.reply_text(
+        "Как вас записать? Жильцы и волонтёры увидят именно это имя.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    pending_phone = db.reference(f"users/{uid}/pendingPhone").get()
+    if not pending_phone:
+        return  # не в процессе регистрации — это не про нас, пусть обработают другие хендлеры
+    name = update.message.text.strip()
+    if len(name) < 2:
+        await update.message.reply_text("Имя слишком короткое, напишите ещё раз.")
+        return
+    pending_role = db.reference(f"users/{uid}/pendingRole").get() or "client"
     db.reference(f"users/{uid}").update({
-        "name": name, "role": pending, "phone": phone,
+        "name": name, "role": pending_role, "phone": pending_phone,
         "onair": False, "verifiedAt": int(datetime.now().timestamp() * 1000),
     })
     db.reference(f"users/{uid}/pendingRole").delete()
-    label = "Волонтёр" if pending == "volunteer" else "Жилец"
-    await update.message.reply_text(f"Готово, {name}! Роль: {label}", reply_markup=role_menu(pending))
+    db.reference(f"users/{uid}/pendingPhone").delete()
+    label = "Волонтёр" if pending_role == "volunteer" else "Жилец"
+    await update.message.reply_text(f"Готово, {name}! Роль: {label}", reply_markup=role_menu(pending_role))
     await update.message.reply_text(
         "Открывайте заявки прямо здесь:",
-        reply_markup=open_app_kb(pending)
+        reply_markup=open_app_kb(pending_role)
     )
 
 # ================= ЖИЛЕЦ: НОВАЯ ЗАЯВКА =================
@@ -532,6 +547,10 @@ def main():
     app.add_handler(CallbackQueryHandler(step_arrived, pattern="^arrived_"))
     app.add_handler(CallbackQueryHandler(step_picked, pattern="^picked_"))
     app.add_handler(CallbackQueryHandler(step_done, pattern="^done_"))
+
+    # ловит "имя" после шаринга номера; регистрируется последним, чтобы не перехватывать
+    # нажатия обычных кнопок меню — сам себя выключает, если пользователь не в процессе регистрации
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, name_received))
 
     log.info("Бот запускается...")
     app.run_polling()
