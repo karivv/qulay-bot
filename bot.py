@@ -227,11 +227,10 @@ async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     me_bot = await context.bot.get_me()
     link = f"https://t.me/{me_bot.username}?start=vol_{code}"
     await update.message.reply_text(
-        f"Код для нового волонтёра: `{code}`\n\n"
+        f"Код для нового волонтёра: {code}\n\n"
         f"Отправьте кандидату эту ссылку (или просто код — его можно ввести и в приложении):\n{link}\n\n"
-        f"Код одноразовый: сработает только у того, кто введёт его первым.",
-        parse_mode="Markdown"
-    )
+        f"Код одноразовый: сработает только у того, кто введёт его первым."
+    )  # без parse_mode: ссылка вида ?start=vol_XXXXXX содержит "_", Markdown ломается на нём
 
 async def invites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
