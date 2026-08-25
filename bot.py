@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import threading
 from datetime import datetime
 
@@ -49,6 +50,9 @@ DB_URL = os.environ["FIREBASE_DB_URL"]
 FIREBASE_CREDS_JSON = os.environ["FIREBASE_SERVICE_ACCOUNT_JSON"]
 # Базовая ссылка на Mini App (GitHub Pages). Роль передаём через ?role=volunteer
 APP_URL = os.environ.get("APP_URL", "https://karivv.github.io/qulay-app/")
+# Telegram ID организаторов через запятую (узнать свой ID — команда /myid).
+# Только они могут выпускать коды приглашения для волонтёров.
+ADMIN_IDS = {x.strip() for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()}
 
 cred = credentials.Certificate(json.loads(FIREBASE_CREDS_JSON))
 firebase_admin.initialize_app(cred, {"databaseURL": DB_URL})
@@ -92,6 +96,38 @@ def fmt_phone(raw: str) -> str:
 
 def full_name(user) -> str:
     return " ".join(filter(None, [user.first_name, user.last_name])) or (user.username or "Без имени")
+
+# ================= КОДЫ ПРИГЛАШЕНИЯ ДЛЯ ВОЛОНТЁРОВ =================
+CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # без 0/O/1/I, чтобы не путали при вводе
+
+def is_admin(uid: str) -> bool:
+    return uid in ADMIN_IDS
+
+def gen_invite_code(n: int = 6) -> str:
+    return "".join(secrets.choice(CODE_ALPHABET) for _ in range(n))
+
+class InviteCodeInvalid(Exception):
+    pass
+
+def redeem_invite_code(code: str, uid: str, name: str) -> bool:
+    """Атомарно помечает код использованным. Возвращает False, если код
+    не найден или уже был использован кем-то другим — тогда роль волонтёра не выдаём."""
+    ref = db.reference(f"inviteCodes/{code}")
+
+    def txn(current):
+        if current is None or current.get("used"):
+            raise InviteCodeInvalid()
+        current["used"] = True
+        current["usedBy"] = uid
+        current["usedByName"] = name
+        current["usedAt"] = int(datetime.now().timestamp() * 1000)
+        return current
+
+    try:
+        ref.transaction(txn)
+        return True
+    except InviteCodeInvalid:
+        return False
 
 def role_menu(role: str):
     if role == "volunteer":
@@ -154,14 +190,66 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=open_app_kb(role)
         )
         return
-    # /start vol  -> регистрация волонтёром, иначе жилец
-    pending_role = "volunteer" if context.args and context.args[0] == "vol" else "client"
+    # /start vol_КОД  -> регистрация волонтёром, но только по действующему коду приглашения
+    arg = context.args[0] if context.args else ""
+    pending_role = "client"
+    if arg.startswith("vol_") or arg == "vol":
+        code = arg[4:].strip().upper() if arg.startswith("vol_") else ""
+        if code and redeem_invite_code(code, uid, full_name(update.effective_user)):
+            pending_role = "volunteer"
+        else:
+            await update.message.reply_text(
+                "Код приглашения недействителен или уже использован.\n"
+                "Чтобы стать волонтёром, попросите новый код у организатора и наберите:\n"
+                "/start vol_КОД"
+            )
     db.reference(f"users/{uid}/pendingRole").set(pending_role)
     await update.message.reply_text(
         "Привет! Это Qulay — вывоз мусора с помощью волонтёров.\n\n"
         "Поделитесь номером, чтобы продолжить:",
         reply_markup=phone_kb()
     )
+
+async def myid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Ваш Telegram ID: `{update.effective_user.id}`", parse_mode="Markdown")
+
+async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    code = gen_invite_code()
+    db.reference(f"inviteCodes/{code}").set({
+        "used": False,
+        "createdAt": int(datetime.now().timestamp() * 1000),
+        "createdBy": uid,
+    })
+    me_bot = await context.bot.get_me()
+    link = f"https://t.me/{me_bot.username}?start=vol_{code}"
+    await update.message.reply_text(
+        f"Код для нового волонтёра: `{code}`\n\n"
+        f"Отправьте кандидату эту ссылку (или просто код — его можно ввести и в приложении):\n{link}\n\n"
+        f"Код одноразовый: сработает только у того, кто введёт его первым.",
+        parse_mode="Markdown"
+    )
+
+async def invites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    codes = db.reference("inviteCodes").get() or {}
+    if not codes:
+        await update.message.reply_text("Кодов ещё не выпускали. Команда /invite создаст новый.")
+        return
+    rows = sorted(codes.items(), key=lambda kv: kv[1].get("createdAt", 0), reverse=True)[:30]
+    lines = []
+    for code, v in rows:
+        if v.get("used"):
+            lines.append(f"❌ {code} — использован ({v.get('usedByName', '?')})")
+        else:
+            lines.append(f"✅ {code} — свободен")
+    await update.message.reply_text("\n".join(lines))
 
 async def contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contact = update.message.contact
@@ -417,6 +505,9 @@ def main():
     bot_app = app
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("myid", myid_cmd))
+    app.add_handler(CommandHandler("invite", invite_cmd))
+    app.add_handler(CommandHandler("invites", invites_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, contact_received))
 
     conv = ConversationHandler(
