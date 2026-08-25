@@ -53,6 +53,7 @@ APP_URL = os.environ.get("APP_URL", "https://karivv.github.io/qulay-app/")
 # Telegram ID организаторов через запятую (узнать свой ID — команда /myid).
 # Только они могут выпускать коды приглашения для волонтёров.
 ADMIN_IDS = {x.strip() for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()}
+POINTS_PER_ORDER = 20  # очков волонтёру за одну закрытую заявку
 
 cred = credentials.Certificate(json.loads(FIREBASE_CREDS_JSON))
 firebase_admin.initialize_app(cred, {"databaseURL": DB_URL})
@@ -269,17 +270,44 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending_phone = db.reference(f"users/{uid}/pendingPhone").get()
     if not pending_phone:
         return  # не в процессе регистрации — это не про нас, пусть обработают другие хендлеры
-    name = update.message.text.strip()
-    if len(name) < 2:
-        await update.message.reply_text("Имя слишком короткое, напишите ещё раз.")
-        return
     pending_role = db.reference(f"users/{uid}/pendingRole").get() or "client"
+    pending_name = db.reference(f"users/{uid}/pendingName").get()
+
+    if not pending_name:
+        # это сообщение — имя
+        name = update.message.text.strip()
+        if len(name) < 2:
+            await update.message.reply_text("Имя слишком короткое, напишите ещё раз.")
+            return
+        db.reference(f"users/{uid}/pendingName").set(name)
+        prompt = ("В каком доме вы живёте? (номер или название)" if pending_role != "volunteer"
+                  else "В каком районе/махалле вы обычно волонтёрите?")
+        await update.message.reply_text(prompt)
+        return
+
+    # это сообщение — дом (жилец) или район (волонтёр)
+    place = update.message.text.strip()
+    if len(place) < 1:
+        await update.message.reply_text("Напишите хотя бы коротко.")
+        return
+    name = pending_name
+    place_field = {"district": place} if pending_role == "volunteer" else {"house": place}
     db.reference(f"users/{uid}").update({
         "name": name, "role": pending_role, "phone": pending_phone,
         "onair": False, "verifiedAt": int(datetime.now().timestamp() * 1000),
+        **place_field,
     })
     db.reference(f"users/{uid}/pendingRole").delete()
     db.reference(f"users/{uid}/pendingPhone").delete()
+    db.reference(f"users/{uid}/pendingName").delete()
+
+    db.reference(f"leaderboard/{uid}").update({
+        "name": name, "role": pending_role,
+        "house": place if pending_role != "volunteer" else None,
+        "district": place if pending_role == "volunteer" else None,
+        "points": 0, "ordersCompleted": 0, "ratingSum": 0, "ratingCount": 0,
+    })
+
     label = "Волонтёр" if pending_role == "volunteer" else "Жилец"
     await update.message.reply_text(f"Готово, {name}! Роль: {label}", reply_markup=role_menu(pending_role))
     await update.message.reply_text(
@@ -448,6 +476,27 @@ async def my_orders_volunteer(update, context):
         await update.message.reply_text(order_text(o))
 
 # ================= ЖИВАЯ СИНХРОНИЗАЦИЯ С Firebase (в обе стороны) =================
+def _bump_leaderboard(uid: str, points: int, orders_delta: int):
+    """Атомарно прибавляет очки/счётчик заявок в leaderboard/{uid}.
+    Если записи ещё нет (пользователь зарегистрирован до появления этой фичи),
+    создаёт её из текущего профиля — тогда дом/район подтянутся сами при
+    следующем сохранении профиля, если пользователь их ещё не указал."""
+    ref = db.reference(f"leaderboard/{uid}")
+
+    def txn(cur):
+        if cur is None:
+            profile = get_user(uid) or {}
+            cur = {
+                "name": profile.get("name", ""), "role": profile.get("role", "client"),
+                "house": profile.get("house"), "district": profile.get("district"),
+                "points": 0, "ordersCompleted": 0, "ratingSum": 0, "ratingCount": 0,
+            }
+        cur["points"] = (cur.get("points") or 0) + points
+        cur["ordersCompleted"] = (cur.get("ordersCompleted") or 0) + orders_delta
+        return cur
+
+    ref.transaction(txn)
+
 def on_orders_change(event):
     """Срабатывает на любое изменение в /orders — и из Mini App, и из бота.
     Держит локальный кэш, чтобы понимать переход статуса, и рассылает
@@ -500,6 +549,16 @@ def on_orders_change(event):
             send_async(int(client_id), STATUS_LABEL.get(new_status, new_status) + "\n" + order_text(after))
         except (ValueError, TypeError):
             pass  # жилец пришёл из Mini App, не из Telegram
+
+        if new_status == "done":
+            # начисляем очки/счётчик независимо от того, кто закрыл заявку —
+            # через бота или через setStatus('done') в Mini App
+            vol_id = after.get("volunteerId")
+            cli_id = after.get("clientId")
+            if vol_id:
+                _bump_leaderboard(str(vol_id), points=POINTS_PER_ORDER, orders_delta=1)
+            if cli_id:
+                _bump_leaderboard(str(cli_id), points=0, orders_delta=1)
 
 def start_firebase_listener():
     def _run():
