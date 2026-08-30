@@ -77,7 +77,7 @@ STATUS_LABEL = {
 # ================= ГЛОБАЛЬНОЕ СОСТОЯНИЕ =================
 main_loop = None            # event loop бота — заполняется в on_startup
 bot_app = None               # Application — заполняется в main()
-orders_cache = {}            # локальная копия /orders для отслеживания смены статусов
+orders_status_cache = {}     # oid -> последний известный status, для отслеживания перехода
 
 # ================= ХЕЛПЕРЫ =================
 def get_user(uid: str):
@@ -499,36 +499,32 @@ def _bump_leaderboard(uid: str, points: int, orders_delta: int):
 
 def on_orders_change(event):
     """Срабатывает на любое изменение в /orders — и из Mini App, и из бота.
-    Держит локальный кэш, чтобы понимать переход статуса, и рассылает
-    уведомления волонтёрам (новая заявка) и жильцам (смена статуса)."""
-    global orders_cache
+    Перечитывает заявку целиком при каждом релевантном событии, а не пытается
+    восстановить её из самого события: .update() сразу несколькими полями
+    (а это буквально любой переход статуса — claim/setStatus/step_*) отдаёт в
+    event.data только ИЗМЕНИВШИЕСЯ поля, а не весь объект. Раньше код заменял
+    ими весь закэшированный объект целиком — clientId и остальное терялись,
+    из-за чего уведомления и начисление очков тихо переставали срабатывать."""
+    global orders_status_cache
     path = event.path.strip("/")
 
     if path == "":
-        orders_cache = event.data or {}
+        orders_status_cache = {oid: (o or {}).get("status") for oid, o in (event.data or {}).items()}
         return
 
-    parts = path.split("/")
-    oid = parts[0]
-    before = orders_cache.get(oid)
-    before_status = before.get("status") if isinstance(before, dict) else None
+    oid = path.split("/")[0]
 
-    if event.data is None and len(parts) == 1:
-        orders_cache.pop(oid, None)
+    if event.data is None and "/" not in path:
+        orders_status_cache.pop(oid, None)
         return
 
-    if len(parts) == 1:
-        orders_cache[oid] = event.data
-    else:
-        rec = orders_cache.setdefault(oid, {})
-        if isinstance(rec, dict):
-            rec[parts[1]] = event.data
-
-    after = orders_cache.get(oid)
+    after = db.reference(f"orders/{oid}").get()
     if not isinstance(after, dict):
         return
 
+    before_status = orders_status_cache.get(oid)
     new_status = after.get("status")
+    orders_status_cache[oid] = new_status
     if new_status == before_status:
         return
 
