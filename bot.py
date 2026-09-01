@@ -78,6 +78,7 @@ STATUS_LABEL = {
 main_loop = None            # event loop бота — заполняется в on_startup
 bot_app = None               # Application — заполняется в main()
 orders_status_cache = {}     # oid -> последний известный status, для отслеживания перехода
+BOT_USERNAME = ""            # заполняется в on_startup, уходит в ссылку Mini App
 
 # ================= ХЕЛПЕРЫ =================
 def get_user(uid: str):
@@ -171,7 +172,14 @@ def phone_kb():
     )
 
 def app_url(role: str) -> str:
-    return APP_URL if role != "volunteer" else APP_URL + "?role=volunteer"
+    """Ссылка на Mini App. Имя бота передаём внутрь, чтобы приложение могло
+    собрать корректную ссылку-приглашение для соседей, а не угадывать его."""
+    parts = []
+    if role == "volunteer":
+        parts.append("role=volunteer")
+    if BOT_USERNAME:
+        parts.append("bot=" + BOT_USERNAME)
+    return APP_URL + ("?" + "&".join(parts) if parts else "")
 
 def open_app_kb(role: str):
     label = "🚶 Открыть приложение" if role == "volunteer" else "📦 Открыть приложение"
@@ -619,8 +627,12 @@ def start_firebase_listener():
 
 # ================= MAIN =================
 async def on_startup(app: Application):
-    global main_loop
+    global main_loop, BOT_USERNAME
     main_loop = asyncio.get_running_loop()
+    try:
+        BOT_USERNAME = (await app.bot.get_me()).username or ""
+    except Exception as e:
+        log.warning(f"не удалось узнать имя бота: {e}")
     start_firebase_listener()
     log.info("Firebase listener запущен")
 
