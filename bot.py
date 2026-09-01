@@ -434,7 +434,10 @@ async def take_order(update, context):
     result = ref.transaction(txn)
     if result and result.get("volunteerId") == uid:
         await query.answer("Заявка ваша ✓")
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚪 Я на месте", callback_data=f"arrived_{oid}")]])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚪 Я на месте", callback_data=f"arrived_{oid}")],
+            [InlineKeyboardButton("↩️ Не смогу выполнить", callback_data=f"drop_{oid}")],
+        ])
         await query.edit_message_text(order_text(result), reply_markup=kb)
     else:
         await query.answer("Заявку уже взял другой волонтёр", show_alert=True)
@@ -444,9 +447,34 @@ async def step_arrived(update, context):
     query = update.callback_query
     oid = query.data.replace("arrived_", "")
     db.reference(f"orders/{oid}").update({"status": "arrived", "arrivedAt": int(datetime.now().timestamp()*1000)})
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📦 Пакет забрал", callback_data=f"picked_{oid}")]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Пакет забрал", callback_data=f"picked_{oid}")],
+        [InlineKeyboardButton("↩️ Не смогу выполнить", callback_data=f"drop_{oid}")],
+    ])
     await query.answer()
     await query.edit_message_text(order_text(db.reference(f"orders/{oid}").get()), reply_markup=kb)
+
+async def drop_order(update, context):
+    """Волонтёр вернул заявку в общий список — без штрафа, иначе он просто пропадёт молча."""
+    query = update.callback_query
+    oid = query.data.replace("drop_", "")
+    uid = str(query.from_user.id)
+    ref = db.reference(f"orders/{oid}")
+
+    def txn(cur):
+        if not cur or cur.get("volunteerId") != uid or cur.get("status") in ("done", "cancelled"):
+            return cur
+        cur["status"] = "open"
+        for k in ("volunteerId", "volunteerName", "volunteerPhone", "takenAt", "arrivedAt", "pickedAt"):
+            cur.pop(k, None)
+        return cur
+
+    result = ref.transaction(txn)
+    if result and result.get("status") == "open":
+        await query.answer("Заявка возвращена")
+        await query.edit_message_text(query.message.text + "\n\n↩️ Вы вернули заявку другим волонтёрам")
+    else:
+        await query.answer("Эту заявку уже нельзя вернуть", show_alert=True)
 
 async def step_picked(update, context):
     query = update.callback_query
@@ -528,16 +556,26 @@ def on_orders_change(event):
     if new_status == before_status:
         return
 
-    if new_status == "open" and before_status is None:
-        # новая заявка -> уведомить волонтёров "на связи"
+    if new_status == "open":
+        # заявка ищет волонтёра: либо она только что создана, либо волонтёр
+        # отказался и вернул её в общий список — во втором случае before_status
+        # не None, и раньше эта ветка молча пропускалась, а заявка повисала
+        returned = before_status is not None
+        title = "🔁 Заявка снова свободна" if returned else "🔔 Новая заявка рядом"
         users = db.reference("users").get() or {}
         for vid, u in users.items():
             if u.get("role") == "volunteer" and u.get("onair"):
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
                 try:
-                    send_async(int(vid), "🔔 Новая заявка рядом\n\n" + order_text(after), reply_markup=kb)
+                    send_async(int(vid), title + "\n\n" + order_text(after), reply_markup=kb)
                 except (ValueError, TypeError):
                     pass  # заявка создана из Mini App, uid не telegram id
+        if returned:
+            try:
+                send_async(int(after.get("clientId")),
+                           "🔎 Волонтёр не смог прийти — ищем другого.\n" + order_text(after))
+            except (ValueError, TypeError):
+                pass
 
     elif new_status in ("taken", "arrived", "picked", "done", "cancelled"):
         client_id = after.get("clientId")
@@ -602,6 +640,7 @@ def main():
     app.add_handler(CallbackQueryHandler(step_arrived, pattern="^arrived_"))
     app.add_handler(CallbackQueryHandler(step_picked, pattern="^picked_"))
     app.add_handler(CallbackQueryHandler(step_done, pattern="^done_"))
+    app.add_handler(CallbackQueryHandler(drop_order, pattern="^drop_"))
 
     # ловит "имя" после шаринга номера; регистрируется последним, чтобы не перехватывать
     # нажатия обычных кнопок меню — сам себя выключает, если пользователь не в процессе регистрации
