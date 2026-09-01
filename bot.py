@@ -625,6 +625,55 @@ def start_firebase_listener():
         db.reference("orders").listen(on_orders_change)
     threading.Thread(target=_run, daemon=True).start()
 
+# ================= СТОРОЖ ЗАВИСШИХ ЗАЯВОК =================
+STALE_MINUTES = 60      # столько заявка может стоять без движения
+ORPHAN_HOURS = 24       # столько никем не взятая заявка ждёт волонтёра
+
+def sweep_stale_orders():
+    """Волонтёр может просто закрыть телефон — тогда взятая заявка висит вечно,
+    и житель ждёт человека, который не придёт. Раз в 10 минут возвращаем такие
+    заявки в общий список, а совсем старые невостребованные закрываем."""
+    now = int(datetime.now().timestamp() * 1000)
+    stale_ms = STALE_MINUTES * 60 * 1000
+    orphan_ms = ORPHAN_HOURS * 60 * 60 * 1000
+    orders = db.reference("orders").get() or {}
+    for oid, o in orders.items():
+        if not isinstance(o, dict):
+            continue
+        status = o.get("status")
+        if status in ("done", "cancelled"):
+            continue
+        if status == "open":
+            if now - (o.get("createdAt") or now) > orphan_ms:
+                db.reference(f"orders/{oid}").update({"status": "cancelled"})
+                log.info(f"заявка {oid} закрыта: сутки без волонтёра")
+                try:
+                    send_async(int(o.get("clientId")),
+                               "⌛️ Заявку закрыли — за сутки никто не смог её взять.\n"
+                               "Попробуйте оставить новую — волонтёров бывает больше по вечерам.")
+                except (ValueError, TypeError):
+                    pass
+            continue
+        # taken / arrived / picked — смотрим на последнее движение
+        last = max(o.get("pickedAt") or 0, o.get("arrivedAt") or 0,
+                   o.get("takenAt") or 0, o.get("createdAt") or 0)
+        if now - last > stale_ms:
+            db.reference(f"orders/{oid}").update({
+                "status": "open", "volunteerId": None, "volunteerName": None,
+                "volunteerPhone": None, "takenAt": None, "arrivedAt": None, "pickedAt": None,
+            })
+            log.info(f"заявка {oid} возвращена в общий список: {STALE_MINUTES} мин без движения")
+
+def start_stale_sweeper():
+    def _run():
+        while True:
+            try:
+                sweep_stale_orders()
+            except Exception as e:
+                log.warning(f"sweep_stale_orders: {e}")
+            threading.Event().wait(600)   # каждые 10 минут
+    threading.Thread(target=_run, daemon=True).start()
+
 # ================= MAIN =================
 async def on_startup(app: Application):
     global main_loop, BOT_USERNAME
@@ -634,7 +683,8 @@ async def on_startup(app: Application):
     except Exception as e:
         log.warning(f"не удалось узнать имя бота: {e}")
     start_firebase_listener()
-    log.info("Firebase listener запущен")
+    start_stale_sweeper()
+    log.info("Firebase listener и сторож зависших заявок запущены")
 
 def main():
     global bot_app
