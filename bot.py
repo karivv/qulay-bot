@@ -211,22 +211,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=phone_kb()
     )
 
-async def next_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Открыть новую версию приложения (next.html) со своим настоящим профилем.
-    Отдельная команда, чтобы не трогать кнопку, которой пользуются остальные."""
+async def classic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Запасной выход: открыть прежнюю версию приложения (classic.html).
+    Нужен только если в новой что-то сломается посреди пилота."""
     uid = str(update.effective_user.id)
     role = (get_user(uid) or {}).get("role", "client")
     base = APP_URL.split("?", 1)[0]
     if not base.endswith("/"):
         base = base.rsplit("/", 1)[0] + "/"
-    url = base + "next.html"
+    url = base + "classic.html"
     if role == "volunteer":
         url += "?role=volunteer"
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🌱 Открыть новую версию",
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Открыть прежнюю версию",
                                                      web_app=WebAppInfo(url=url))]])
     await update.message.reply_text(
-        f"Новая версия приложения. Ваша роль: "
-        f"{'волонтёр' if role == 'volunteer' else 'житель'} — она подставится сама.",
+        "Прежняя версия приложения — на случай, если в новой что-то не работает.",
         reply_markup=kb
     )
 
@@ -632,7 +631,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myid", myid_cmd))
-    app.add_handler(CommandHandler("next", next_cmd))
+    app.add_handler(CommandHandler("classic", classic_cmd))
     app.add_handler(CommandHandler("invite", invite_cmd))
     app.add_handler(CommandHandler("invites", invites_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, contact_received))
