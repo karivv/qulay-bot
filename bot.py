@@ -200,8 +200,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     # /start vol_КОД  -> регистрация волонтёром, но только по действующему коду приглашения
+    # /start ref_UID  -> пришёл по ссылке жителя, запомним кто пригласил
     arg = context.args[0] if context.args else ""
     pending_role = "client"
+    if arg.startswith("ref_"):
+        inviter = arg[4:].strip()
+        if inviter and inviter != uid:
+            db.reference(f"users/{uid}/pendingRef").set(inviter)
     if arg.startswith("vol_") or arg == "vol":
         code = arg[4:].strip().upper() if arg.startswith("vol_") else ""
         if code and redeem_invite_code(code, uid, full_name(update.effective_user)):
@@ -257,6 +262,149 @@ async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Ссылка для нового волонтёра:\n{link}\n\n"
         f"Одноразовая: сработает только у того, кто откроет её первым."
     )  # без parse_mode: ссылка вида ?start=vol_XXXXXX содержит "_", Markdown ломается на нём
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сводка по сервису. Живёт в боте, а не в приложении: у Mini App нет входа
+    по паролю, и любое правило, открывающее список пользователей организатору,
+    открыло бы телефоны всех жителей кому угодно."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    users = db.reference("users").get() or {}
+    orders = db.reference("orders").get() or {}
+    reqs = db.reference("inviteRequests").get() or {}
+    codes = db.reference("inviteCodes").get() or {}
+
+    vols = [u for u in users.values() if isinstance(u, dict) and u.get("role") == "volunteer"]
+    cls = [u for u in users.values() if isinstance(u, dict) and u.get("role") == "client"]
+    onair = [u for u in vols if u.get("onair")]
+    no_photo = [u for u in vols if not u.get("hasPhoto")]
+    by_status = {}
+    for o in orders.values():
+        if isinstance(o, dict):
+            by_status[o.get("status")] = by_status.get(o.get("status"), 0) + 1
+    pending = [r for r in reqs.values() if isinstance(r, dict) and r.get("status") == "pending"]
+    free_codes = [c for c, v in codes.items() if isinstance(v, dict) and not v.get("used")]
+
+    lines = [
+        "📊 Qulay — сводка", "",
+        f"👤 Жителей: {len(cls)}",
+        f"🚶 Волонтёров: {len(vols)} (на связи {len(onair)})",
+    ]
+    if no_photo:
+        lines.append(f"⚠️ Без фото: {len(no_photo)} — их жители не видят в лицо")
+    lines += ["", "📦 Заявки:"]
+    for k in ("open", "taken", "arrived", "picked", "done", "cancelled"):
+        if by_status.get(k):
+            lines.append(f"   {STATUS_LABEL.get(k, k)} — {by_status[k]}")
+    lines += ["", f"🎟 Свободных кодов: {len(free_codes)}",
+              f"✉️ Запросов на приглашение: {len(pending)}"]
+    if pending:
+        lines.append("Посмотреть: /requests")
+    lines += ["", "Команды: /volunteers /requests /invite /invites"]
+    await update.message.reply_text("\n".join(lines))
+
+async def volunteers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    users = db.reference("users").get() or {}
+    board = db.reference("leaderboard").get() or {}
+    vols = [(k, v) for k, v in users.items()
+            if isinstance(v, dict) and v.get("role") == "volunteer"]
+    if not vols:
+        await update.message.reply_text("Волонтёров пока нет.")
+        return
+    vols.sort(key=lambda kv: -(board.get(kv[0], {}) or {}).get("points", 0))
+    lines = ["🚶 Волонтёры", ""]
+    for vid, v in vols[:30]:
+        b = board.get(vid, {}) or {}
+        cnt = b.get("ratingCount") or 0
+        avg = round(b.get("ratingSum", 0) / cnt, 1) if cnt else None
+        lines.append(
+            f"{'🟢' if v.get('onair') else '⚪️'} {v.get('name','—')} · {v.get('phone','')}\n"
+            f"   {v.get('district') or 'район не указан'} · "
+            f"{b.get('ordersCompleted',0)} заявок · {b.get('points',0)} очк."
+            + (f" · ★{avg}" if avg else "")
+            + ("" if v.get("hasPhoto") else "\n   ⚠️ без фото")
+        )
+    await update.message.reply_text("\n".join(lines))
+
+async def requests_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    reqs = db.reference("inviteRequests").get() or {}
+    pending = [(k, v) for k, v in reqs.items()
+               if isinstance(v, dict) and v.get("status") == "pending"]
+    if not pending:
+        await update.message.reply_text("Новых запросов на приглашение нет.")
+        return
+    pending.sort(key=lambda kv: kv[1].get("at", 0))
+    for rid, r in pending[:10]:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Выдать код", callback_data=f"okreq_{rid}"),
+            InlineKeyboardButton("✖️ Отклонить", callback_data=f"noreq_{rid}"),
+        ]])
+        await update.message.reply_text(
+            f"✉️ Запрос на приглашение\n\n"
+            f"Кого зовут: {r.get('forName','—')} · {r.get('forPhone','')}\n"
+            f"Просит: {r.get('byName','—')} · {r.get('byPhone','')}",
+            reply_markup=kb
+        )
+
+async def approve_request(update, context):
+    query = update.callback_query
+    uid = str(query.from_user.id)
+    if not is_admin(uid):
+        await query.answer("Только для организатора", show_alert=True)
+        return
+    rid = query.data.replace("okreq_", "")
+    ref = db.reference(f"inviteRequests/{rid}")
+    r = ref.get()
+    if not r or r.get("status") != "pending":
+        await query.answer("Запрос уже обработан", show_alert=True)
+        return
+    code = gen_invite_code()
+    db.reference(f"inviteCodes/{code}").set({
+        "used": False, "createdAt": int(datetime.now().timestamp() * 1000),
+        "createdBy": uid, "forName": r.get("forName"), "forPhone": r.get("forPhone"),
+    })
+    ref.update({"status": "approved", "code": code,
+                "decidedAt": int(datetime.now().timestamp() * 1000)})
+    link = f"https://t.me/{BOT_USERNAME}?start=vol_{code}" if BOT_USERNAME else f"код {code}"
+    try:
+        send_async(int(r.get("byUid")),
+                   f"✅ Код для {r.get('forName','друга')} готов.\n"
+                   f"Перешлите ему эту ссылку:\n{link}")
+    except (ValueError, TypeError):
+        pass
+    await query.answer("Код выдан ✓")
+    await query.edit_message_text(query.message.text + f"\n\n✅ Выдан код {code}")
+
+async def decline_request(update, context):
+    query = update.callback_query
+    uid = str(query.from_user.id)
+    if not is_admin(uid):
+        await query.answer("Только для организатора", show_alert=True)
+        return
+    rid = query.data.replace("noreq_", "")
+    ref = db.reference(f"inviteRequests/{rid}")
+    r = ref.get()
+    if not r or r.get("status") != "pending":
+        await query.answer("Запрос уже обработан", show_alert=True)
+        return
+    ref.update({"status": "declined", "decidedAt": int(datetime.now().timestamp() * 1000)})
+    try:
+        send_async(int(r.get("byUid")),
+                   f"Организатор пока не выдал код для {r.get('forName','вашего друга')}.")
+    except (ValueError, TypeError):
+        pass
+    await query.answer("Отклонено")
+    await query.edit_message_text(query.message.text + "\n\n✖️ Отклонено")
 
 async def invites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -323,9 +471,21 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "onair": False, "verifiedAt": int(datetime.now().timestamp() * 1000),
         **place_field,
     })
+    inviter = db.reference(f"users/{uid}/pendingRef").get()
+    if inviter:
+        db.reference(f"users/{uid}/invitedBy").set(inviter)
+        db.reference(f"referrals/{inviter}/{uid}").set({
+            "name": name, "phone": pending_phone, "role": pending_role,
+            "at": int(datetime.now().timestamp() * 1000),
+        })
+        try:
+            send_async(int(inviter), f"🏡 По вашей ссылке зарегистрировался {name} · {pending_phone}")
+        except (ValueError, TypeError):
+            pass
     db.reference(f"users/{uid}/pendingRole").delete()
     db.reference(f"users/{uid}/pendingPhone").delete()
     db.reference(f"users/{uid}/pendingName").delete()
+    db.reference(f"users/{uid}/pendingRef").delete()
 
     db.reference(f"leaderboard/{uid}").update({
         "name": name, "role": pending_role,
@@ -696,6 +856,9 @@ def main():
     app.add_handler(CommandHandler("classic", classic_cmd))
     app.add_handler(CommandHandler("invite", invite_cmd))
     app.add_handler(CommandHandler("invites", invites_cmd))
+    app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CommandHandler("volunteers", volunteers_cmd))
+    app.add_handler(CommandHandler("requests", requests_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, contact_received))
 
     conv = ConversationHandler(
@@ -722,6 +885,8 @@ def main():
     app.add_handler(CallbackQueryHandler(step_picked, pattern="^picked_"))
     app.add_handler(CallbackQueryHandler(step_done, pattern="^done_"))
     app.add_handler(CallbackQueryHandler(drop_order, pattern="^drop_"))
+    app.add_handler(CallbackQueryHandler(approve_request, pattern="^okreq_"))
+    app.add_handler(CallbackQueryHandler(decline_request, pattern="^noreq_"))
 
     # ловит "имя" после шаринга номера; регистрируется последним, чтобы не перехватывать
     # нажатия обычных кнопок меню — сам себя выключает, если пользователь не в процессе регистрации
