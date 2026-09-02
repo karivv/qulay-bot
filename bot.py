@@ -32,6 +32,9 @@ import secrets
 import threading
 from datetime import datetime
 
+import base64
+import io
+
 import firebase_admin
 from firebase_admin import credentials, db
 
@@ -304,6 +307,85 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("Посмотреть: /requests")
     lines += ["", "Команды: /volunteers /requests /invite /invites"]
     await update.message.reply_text("\n".join(lines))
+
+def _find_user(needle: str):
+    """Ищем пользователя по Telegram ID, номеру или части имени."""
+    users = db.reference("users").get() or {}
+    needle = needle.strip().lower()
+    digits = "".join(ch for ch in needle if ch.isdigit())
+    for uid_, u in users.items():
+        if not isinstance(u, dict):
+            continue
+        if uid_ == needle:
+            return uid_, u
+        if digits and len(digits) >= 7 and digits[-7:] in "".join(
+                ch for ch in (u.get("phone") or "") if ch.isdigit()):
+            return uid_, u
+        if len(needle) >= 3 and needle in (u.get("name") or "").lower():
+            return uid_, u
+    return None, None
+
+async def block_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/block <id|телефон|имя> — закрыть доступ. /unblock — вернуть."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    unblock = update.message.text.strip().startswith("/unblock")
+    if not context.args:
+        await update.message.reply_text(
+            "Кого? Укажите Telegram ID, номер или имя:\n"
+            f"{'/unblock' if unblock else '/block'} 5730011770")
+        return
+    target, u = _find_user(" ".join(context.args))
+    if not target:
+        await update.message.reply_text("Не нашёл такого человека.")
+        return
+    db.reference(f"users/{target}/blocked").set(not unblock)
+    if not unblock:
+        db.reference(f"users/{target}/onair").set(False)
+    label = "Волонтёр" if u.get("role") == "volunteer" else "Житель"
+    await update.message.reply_text(
+        f"{'✅ Доступ возвращён' if unblock else '⛔️ Доступ закрыт'}\n"
+        f"{label}: {u.get('name','—')} · {u.get('phone','')}")
+    try:
+        send_async(int(target), "✅ Доступ к Qulay возвращён." if unblock
+                   else "⛔️ Организатор временно закрыл вам доступ к Qulay.")
+    except (ValueError, TypeError):
+        pass
+
+async def doc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/doc <id|телефон|имя> — показать документ волонтёра.
+    Документы лежат в узле, который приложению читать запрещено: их видит
+    только бот со служебным ключом, то есть фактически только организатор."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    if not context.args:
+        await update.message.reply_text("Кого? Например: /doc Тимур")
+        return
+    target, u = _find_user(" ".join(context.args))
+    if not target:
+        await update.message.reply_text("Не нашёл такого человека.")
+        return
+    sent = False
+    for node, caption in (("volunteerPhotos", "Фото волонтёра"), ("volunteerDocs", "Документ")):
+        rec = db.reference(f"{node}/{target}").get() or {}
+        img = rec.get("img") if isinstance(rec, dict) else None
+        if not img or "," not in img:
+            continue
+        try:
+            raw = base64.b64decode(img.split(",", 1)[1])
+            await update.message.reply_photo(
+                io.BytesIO(raw),
+                caption=f"{caption} — {u.get('name','—')} · {u.get('phone','')}")
+            sent = True
+        except Exception as e:
+            log.warning(f"doc_cmd {node}/{target}: {e}")
+    if not sent:
+        await update.message.reply_text(
+            f"{u.get('name','—')}: фото и документ не загружены.")
 
 async def volunteers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -749,7 +831,13 @@ def on_orders_change(event):
         returned = before_status is not None
         title = "🔁 Заявка снова свободна" if returned else "🔔 Новая заявка рядом"
         users = db.reference("users").get() or {}
+        wants_female = bool(after.get("prefFemale"))
         for vid, u in users.items():
+            if not isinstance(u, dict) or u.get("blocked"):
+                continue
+            # житель попросил женщину — мужчинам такую заявку не предлагаем
+            if wants_female and u.get("gender") and u.get("gender") != "f":
+                continue
             if u.get("role") == "volunteer" and u.get("onair"):
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
                 try:
@@ -780,10 +868,31 @@ def on_orders_change(event):
             if cli_id:
                 _bump_leaderboard(str(cli_id), points=0, orders_delta=1)
 
+def on_report(event):
+    """Кнопка «Что-то не так» из приложения — сразу всем организаторам."""
+    if event.data is None or not isinstance(event.data, dict):
+        return
+    r = event.data
+    if "byUid" not in r:          # пришёл весь узел целиком при подписке
+        return
+    who = "житель" if r.get("role") == "client" else "волонтёр"
+    text = (f"🆘 Жалоба во время заявки\n\n"
+            f"От кого: {r.get('byName','—')} ({who}) · {r.get('byPhone','')}\n"
+            f"Адрес: {r.get('addr') or '—'}\n"
+            f"Вторая сторона: {r.get('otherName') or '—'} · {r.get('otherPhone') or ''}")
+    for aid in ADMIN_IDS:
+        try:
+            send_async(int(aid), text)
+        except (ValueError, TypeError):
+            pass
+
 def start_firebase_listener():
     def _run():
         db.reference("orders").listen(on_orders_change)
     threading.Thread(target=_run, daemon=True).start()
+    def _reports():
+        db.reference("reports").listen(on_report)
+    threading.Thread(target=_reports, daemon=True).start()
 
 # ================= СТОРОЖ ЗАВИСШИХ ЗАЯВОК =================
 STALE_MINUTES = 60      # столько заявка может стоять без движения
@@ -859,6 +968,9 @@ def main():
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("volunteers", volunteers_cmd))
     app.add_handler(CommandHandler("requests", requests_cmd))
+    app.add_handler(CommandHandler("block", block_cmd))
+    app.add_handler(CommandHandler("unblock", block_cmd))
+    app.add_handler(CommandHandler("doc", doc_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, contact_received))
 
     conv = ConversationHandler(
