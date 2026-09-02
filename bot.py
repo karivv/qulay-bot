@@ -831,12 +831,8 @@ def on_orders_change(event):
         returned = before_status is not None
         title = "🔁 Заявка снова свободна" if returned else "🔔 Новая заявка рядом"
         users = db.reference("users").get() or {}
-        wants_female = bool(after.get("prefFemale"))
         for vid, u in users.items():
             if not isinstance(u, dict) or u.get("blocked"):
-                continue
-            # житель попросил женщину — мужчинам такую заявку не предлагаем
-            if wants_female and u.get("gender") and u.get("gender") != "f":
                 continue
             if u.get("role") == "volunteer" and u.get("onair"):
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
