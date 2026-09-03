@@ -850,7 +850,14 @@ def on_orders_change(event):
     elif new_status in ("taken", "arrived", "picked", "done", "cancelled"):
         client_id = after.get("clientId")
         try:
-            send_async(int(client_id), STATUS_LABEL.get(new_status, new_status) + "\n" + order_text(after))
+            msg = STATUS_LABEL.get(new_status, new_status) + "\n" + order_text(after)
+            if new_status in ("taken", "arrived", "picked"):
+                deep_url = app_url("client") + ("&" if "?" in app_url("client") else "?") + "view=live"
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "📱 Открыть заявку", web_app=WebAppInfo(url=deep_url))]])
+                send_async(int(client_id), msg, reply_markup=kb)
+            else:
+                send_async(int(client_id), msg)
         except (ValueError, TypeError):
             pass  # жилец пришёл из Mini App, не из Telegram
 
