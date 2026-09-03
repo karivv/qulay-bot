@@ -854,6 +854,15 @@ def on_orders_change(event):
         except (ValueError, TypeError):
             pass  # жилец пришёл из Mini App, не из Telegram
 
+        if new_status == "cancelled" and after.get("volunteerId"):
+            # житель отменил, когда волонтёр уже шёл — иначе тот узнает
+            # только по тому, что экран в приложении молча сменился
+            try:
+                send_async(int(after["volunteerId"]),
+                           "❌ Житель отменил заявку — идти не нужно.\n" + order_text(after))
+            except (ValueError, TypeError):
+                pass
+
         if new_status == "done":
             # начисляем очки/счётчик независимо от того, кто закрыл заявку —
             # через бота или через setStatus('done') в Mini App
