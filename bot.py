@@ -1141,18 +1141,55 @@ def order_is_due(o: dict) -> bool:
         return True
     return int(datetime.now().timestamp() * 1000) >= t - LEAD_MIN * 60 * 1000
 
-def broadcast_open_order(oid: str, o: dict, title: str):
-    """Разослать свободную заявку всем волонтёрам «на связи»."""
+def broadcast_open_order(oid: str, o: dict, title: str, everyone: bool = False):
+    """Разослать свободную заявку волонтёрам «на связи».
+    everyone=True — всем волонтёрам подряд: это вторая ступень, когда заявку
+    четверть часа никто не взял и молчание уже дороже лишнего уведомления."""
     users = db.reference("users").get() or {}
+    sent = 0
     for vid, u in users.items():
         if not isinstance(u, dict) or u.get("blocked"):
             continue
-        if u.get("role") == "volunteer" and u.get("onair"):
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
+        if u.get("role") != "volunteer":
+            continue
+        if not everyone and not u.get("onair"):
+            continue
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
+        try:
+            send_async(int(vid), title + "\n\n" + order_text(o, full=False), reply_markup=kb)
+            sent += 1
+        except (ValueError, TypeError):
+            pass  # заявка создана из Mini App, uid не telegram id
+    return sent
+
+ESCALATE_MIN = 15       # столько ждём, прежде чем будить волонтёров не «на связи»
+ALERT_ADMIN_MIN = 30    # столько — прежде чем звать организатора
+
+def escalate_open_order(oid: str, o: dict, now: int):
+    """Заявка висит, а волонтёры выключили тумблер — раньше она молча ждала
+    сутки, и об этом не узнавал никто, включая организатора."""
+    # у заявки «к 18:00» ожидание считаем с момента рассылки, а не с создания:
+    # иначе она эскалируется сразу, хотя волонтёры увидели её минуту назад
+    since = o.get("notifiedAt") or o.get("createdAt") or now
+    waited = (now - since) / 60000
+    if waited >= ESCALATE_MIN and not o.get("escalatedAt"):
+        n = broadcast_open_order(
+            oid, o, "🔔 Заявку никто не взял — нужна помощь", everyone=True)
+        db.reference(f"orders/{oid}/escalatedAt").set(now)
+        log.info(f"заявка {oid}: разослана всем волонтёрам ({n})")
+        return
+    if waited >= ALERT_ADMIN_MIN and not o.get("adminAlertedAt"):
+        db.reference(f"orders/{oid}/adminAlertedAt").set(now)
+        text = (f"⚠️ Заявка висит {round(waited)} мин без волонтёра\n\n"
+                f"{order_text(o)}\n"
+                f"Житель: {o.get('clientName','—')} · {o.get('clientPhone','')}\n\n"
+                "Посмотреть все: /orders")
+        for aid in ADMIN_IDS:
             try:
-                send_async(int(vid), title + "\n\n" + order_text(o, full=False), reply_markup=kb)
+                send_async(int(aid), text)
             except (ValueError, TypeError):
-                pass  # заявка создана из Mini App, uid не telegram id
+                pass
+        log.info(f"заявка {oid}: организатор предупреждён")
 
 # ================= СТОРОЖ ЗАВИСШИХ ЗАЯВОК =================
 STALE_MINUTES = 60      # столько заявка может стоять без движения
@@ -1203,6 +1240,10 @@ def sweep_stale_orders():
                 broadcast_open_order(oid, o, "🕓 Скоро время заявки")
                 db.reference(f"orders/{oid}/notifiedAt").set(now)
                 log.info(f"заявка {oid} разослана: подошло назначенное время")
+                continue
+            # уже разослана, но так и висит — поднимаем тревогу по ступеням
+            if o.get("notifiedAt"):
+                escalate_open_order(oid, o, now)
             continue
         # taken / arrived / picked — смотрим на последнее движение
         last = max(o.get("pickedAt") or 0, o.get("arrivedAt") or 0,
