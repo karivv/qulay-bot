@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 from datetime import datetime
@@ -146,7 +147,16 @@ def role_menu(role: str):
         [KeyboardButton("📋 Мои заявки")],
     ], resize_keyboard=True)
 
-def order_text(o: dict) -> str:
+def order_text(o: dict, full: bool = True) -> str:
+    """full=False — версия для рассылки по всем свободным волонтёрам: там
+    квартира, подъезд и комментарий (в нём часто код домофона) ещё не должны
+    светиться. Точный адрес появляется у того, кто заявку взял."""
+    if not full:
+        lines = [f"Дом {o.get('house','—')}"]
+        if o.get("bags"):
+            lines.append(f"🧺 {o['bags']}")
+        lines.append("🔒 Точный адрес — после того, как возьмёте заявку")
+        return "\n".join(lines)
     lines = [f"Дом {o.get('house','—')}, кв. {o.get('flat','—')}"]
     lines.append(f"Подъезд {o.get('entrance','—')}, этаж {o.get('floor','—')}")
     if o.get("note"):
@@ -676,7 +686,7 @@ async def orders_nearby(update, context):
         return
     for oid, o in entries[:10]:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
-        await update.message.reply_text(order_text(o), reply_markup=kb)
+        await update.message.reply_text(order_text(o, full=False), reply_markup=kb)
 
 # ================= ВОЛОНТЁР: ВЗЯТЬ ЗАЯВКУ (транзакция — защита от гонки) =================
 async def take_order(update, context):
@@ -831,16 +841,11 @@ def on_orders_change(event):
         # не None, и раньше эта ветка молча пропускалась, а заявка повисала
         returned = before_status is not None
         title = "🔁 Заявка снова свободна" if returned else "🔔 Новая заявка рядом"
-        users = db.reference("users").get() or {}
-        for vid, u in users.items():
-            if not isinstance(u, dict) or u.get("blocked"):
-                continue
-            if u.get("role") == "volunteer" and u.get("onair"):
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
-                try:
-                    send_async(int(vid), title + "\n\n" + order_text(after), reply_markup=kb)
-                except (ValueError, TypeError):
-                    pass  # заявка создана из Mini App, uid не telegram id
+        # заявку «к 18:00» не будим сейчас — её разошлёт сторож, когда подойдёт
+        # время, иначе волонтёр возьмёт её в полдень и житель полдня ждёт
+        if order_is_due(after):
+            broadcast_open_order(oid, after, title)
+            db.reference(f"orders/{oid}/notifiedAt").set(int(datetime.now().timestamp() * 1000))
         if returned:
             try:
                 send_async(int(after.get("clientId")),
@@ -899,6 +904,28 @@ def on_report(event):
         except (ValueError, TypeError):
             pass
 
+def on_order_msg(event):
+    """Готовая фраза из приложения — доставляем второй стороне в чат.
+    Звонок остаётся, но перестаёт быть единственным способом связи."""
+    if event.data is None or not isinstance(event.data, dict):
+        return
+    m = event.data
+    if "toUid" not in m:          # пришёл весь узел целиком при подписке
+        return
+    who = "Житель" if m.get("fromRole") == "client" else "Волонтёр"
+    text = f"💬 {who} {m.get('fromName','')}:\n\n{m.get('text','')}"
+    try:
+        send_async(int(m["toUid"]), text)
+    except (ValueError, TypeError):
+        pass  # вторая сторона пришла не из Telegram
+    # фразы живут только ради доставки — узел не копим
+    try:
+        oid = event.path.strip("/").split("/")[0]
+        if oid:
+            db.reference(f"orderMsgs/{oid}").delete()
+    except Exception:
+        pass
+
 def start_firebase_listener():
     def _run():
         db.reference("orders").listen(on_orders_change)
@@ -906,6 +933,43 @@ def start_firebase_listener():
     def _reports():
         db.reference("reports").listen(on_report)
     threading.Thread(target=_reports, daemon=True).start()
+    def _msgs():
+        db.reference("orderMsgs").listen(on_order_msg)
+    threading.Thread(target=_msgs, daemon=True).start()
+
+LEAD_MIN = 40           # за столько минут до назначенного времени будим волонтёров
+
+def order_due_at(o: dict):
+    """Момент, к которому житель просил забрать мусор. None — «сейчас».
+    Строка вида «сегодня в 18:00» приходит из приложения как есть."""
+    w = (o or {}).get("when") or ""
+    if not w or w == "сейчас":
+        return None
+    m = re.search(r"(\d{1,2}):(\d{2})", w)
+    if not m:
+        return None
+    created = datetime.fromtimestamp((o.get("createdAt") or 0) / 1000) if o.get("createdAt") else datetime.now()
+    due = created.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+    return int(due.timestamp() * 1000)
+
+def order_is_due(o: dict) -> bool:
+    t = order_due_at(o)
+    if t is None:
+        return True
+    return int(datetime.now().timestamp() * 1000) >= t - LEAD_MIN * 60 * 1000
+
+def broadcast_open_order(oid: str, o: dict, title: str):
+    """Разослать свободную заявку всем волонтёрам «на связи»."""
+    users = db.reference("users").get() or {}
+    for vid, u in users.items():
+        if not isinstance(u, dict) or u.get("blocked"):
+            continue
+        if u.get("role") == "volunteer" and u.get("onair"):
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
+            try:
+                send_async(int(vid), title + "\n\n" + order_text(o, full=False), reply_markup=kb)
+            except (ValueError, TypeError):
+                pass  # заявка создана из Mini App, uid не telegram id
 
 # ================= СТОРОЖ ЗАВИСШИХ ЗАЯВОК =================
 STALE_MINUTES = 60      # столько заявка может стоять без движения
@@ -935,6 +999,12 @@ def sweep_stale_orders():
                                "Попробуйте оставить новую — волонтёров бывает больше по вечерам.")
                 except (ValueError, TypeError):
                     pass
+                continue
+            # запланированная заявка, время которой подошло, — рассылаем один раз
+            if not o.get("notifiedAt") and order_is_due(o):
+                broadcast_open_order(oid, o, "🕓 Скоро время заявки")
+                db.reference(f"orders/{oid}/notifiedAt").set(now)
+                log.info(f"заявка {oid} разослана: подошло назначенное время")
             continue
         # taken / arrived / picked — смотрим на последнее движение
         last = max(o.get("pickedAt") or 0, o.get("arrivedAt") or 0,
