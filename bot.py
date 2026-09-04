@@ -318,7 +318,8 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("Посмотреть: /requests")
     lines += ["", "Цифры пилота: /stats",
               "Заявки сейчас: /orders",
-              "Человек: /user <id|телефон|имя> · написать: /say <кто> <текст>",
+              "Человек: /user <id|телефон|имя>",
+              "Написать: /say <кто> <текст> · закрыть диалог: /close <кто>",
               "Ещё: /volunteers /requests /invite /invites /block /doc"]
     await update.message.reply_text("\n".join(lines))
 
@@ -550,14 +551,42 @@ async def user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append(f"Команды: /block {target} · /doc {target} · /say {target} текст")
     await update.message.reply_text("\n".join(lines))
 
+# ================= ДИАЛОГ С ОРГАНИЗАТОРОМ =================
+# Жалоба уходила в одну сторону: человек написал — и всё, ответить организатору
+# он уже не мог. Сеанс открывает организатор; пока он открыт, всё, что человек
+# пишет в чат бота, уходит организатору. Закрыл — снова тишина, чтобы бот не
+# превратился в свалку случайных сообщений.
+SUPPORT_IDLE_MIN = 180   # столько сеанс живёт без сообщений
+
+def support_open(uid: str, by: str):
+    db.reference(f"support/{uid}").set({
+        "open": True, "by": by,
+        "openedAt": int(datetime.now().timestamp() * 1000),
+        "lastAt": int(datetime.now().timestamp() * 1000),
+    })
+
+def support_close(uid: str):
+    db.reference(f"support/{uid}").delete()
+
+def support_is_open(uid: str) -> bool:
+    s = db.reference(f"support/{uid}").get()
+    if not isinstance(s, dict) or not s.get("open"):
+        return False
+    last = s.get("lastAt") or s.get("openedAt") or 0
+    if (int(datetime.now().timestamp() * 1000) - last) > SUPPORT_IDLE_MIN * 60 * 1000:
+        support_close(uid)          # сам себя закрывает, если разговор заглох
+        return False
+    return True
+
 async def say_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Написать человеку от имени сервиса, не выходя из бота."""
+    """Написать человеку от имени сервиса. Заодно открывает сеанс — иначе
+    человек получает вопрос и не может на него ответить."""
     uid = str(update.effective_user.id)
     if not is_admin(uid):
         await update.message.reply_text("Эта команда только для организатора.")
         return
     if len(context.args) < 2:
-        await update.message.reply_text("Как: /say 5730011770 Добрый день, ваш код 1234")
+        await update.message.reply_text("Как: /say 5730011770 Добрый день, что случилось?")
         return
     target, u = _find_user(context.args[0])
     if not target:
@@ -565,10 +594,57 @@ async def say_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = " ".join(context.args[1:])
     try:
-        send_async(int(target), f"✉️ Сообщение от организатора Qulay:\n\n{text}")
-        await update.message.reply_text(f"Отправлено: {u.get('name','—')}")
+        send_async(int(target),
+                   f"✉️ Организатор Qulay:\n\n{text}\n\n"
+                   "— Можете ответить прямо здесь, просто напишите сообщение.")
+        support_open(target, uid)
+        await update.message.reply_text(
+            f"Отправлено: {u.get('name','—')}\n"
+            f"Диалог открыт — ответы придут сюда. Закрыть: /close {target}")
     except (ValueError, TypeError):
         await update.message.reply_text("Этот человек пришёл не из Telegram — написать не получится.")
+
+async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Завершить сеанс — дальше человек писать напрямую не сможет."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    if not context.args:
+        await update.message.reply_text("Кого закрыть? /close 5730011770")
+        return
+    target, u = _find_user(" ".join(context.args))
+    if not target:
+        await update.message.reply_text("Не нашёл такого человека.")
+        return
+    support_close(target)
+    try:
+        send_async(int(target), "✅ Организатор завершил разговор. Спасибо!")
+    except (ValueError, TypeError):
+        pass
+    await update.message.reply_text(f"Диалог закрыт: {u.get('name','—')}")
+
+async def support_open_cb(update, context):
+    """Кнопка «Ответить» под жалобой — сразу открывает сеанс."""
+    query = update.callback_query
+    uid = str(query.from_user.id)
+    if not is_admin(uid):
+        await query.answer("Только для организатора")
+        return
+    target = query.data.replace("supop_", "")
+    u = get_user(target) or {}
+    support_open(target, uid)
+    await query.answer("Диалог открыт")
+    try:
+        send_async(int(target),
+                   "✉️ Организатор Qulay на связи — напишите, что случилось. "
+                   "Просто отправьте сообщение сюда.")
+    except (ValueError, TypeError):
+        pass
+    await query.edit_message_text(
+        query.message.text
+        + f"\n\n💬 Диалог открыт с {u.get('name','—')}."
+          f"\nОтветить: /say {target} текст\nЗакрыть: /close {target}")
 
 async def volunteers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -708,7 +784,23 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     pending_phone = db.reference(f"users/{uid}/pendingPhone").get()
     if not pending_phone:
-        return  # не в процессе регистрации — это не про нас, пусть обработают другие хендлеры
+        # не регистрация — но, может быть, идёт разговор с организатором.
+        # Отдельный MessageHandler тут заводить нельзя: второй широкий
+        # filters.TEXT начал бы перехватывать кнопки меню.
+        if support_is_open(uid):
+            u = get_user(uid) or {}
+            who = "волонтёр" if u.get("role") == "volunteer" else "житель"
+            text = (f"💬 {u.get('name','—')} ({who}) · {u.get('phone','')}\n\n"
+                    f"{update.message.text}\n\n"
+                    f"Ответить: /say {uid} текст · Закрыть: /close {uid}")
+            db.reference(f"support/{uid}/lastAt").set(int(datetime.now().timestamp() * 1000))
+            for aid in ADMIN_IDS:
+                try:
+                    send_async(int(aid), text)
+                except (ValueError, TypeError):
+                    pass
+            await update.message.reply_text("Передал организатору ✓")
+        return  # не в процессе регистрации — пусть обработают другие хендлеры
     pending_role = db.reference(f"users/{uid}/pendingRole").get() or "client"
     pending_name = db.reference(f"users/{uid}/pendingName").get()
 
@@ -1071,13 +1163,18 @@ def on_report(event):
     if "byUid" not in r:          # пришёл весь узел целиком при подписке
         return
     who = "житель" if r.get("role") == "client" else "волонтёр"
+    by = str(r.get("byUid") or "")
     text = (f"🆘 Жалоба во время заявки\n\n"
             f"От кого: {r.get('byName','—')} ({who}) · {r.get('byPhone','')}\n"
             f"Адрес: {r.get('addr') or '—'}\n"
             f"Вторая сторона: {r.get('otherName') or '—'} · {r.get('otherPhone') or ''}")
+    # без этой кнопки жалоба была улицей с односторонним движением: спросить
+    # «что случилось?» организатор мог, а ответить человек — уже нет
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+        "💬 Открыть диалог", callback_data=f"supop_{by}")]]) if by else None
     for aid in ADMIN_IDS:
         try:
-            send_async(int(aid), text)
+            send_async(int(aid), text, reply_markup=kb)
         except (ValueError, TypeError):
             pass
 
@@ -1306,6 +1403,7 @@ def main():
     app.add_handler(CommandHandler("orders", orders_cmd))
     app.add_handler(CommandHandler("user", user_cmd))
     app.add_handler(CommandHandler("say", say_cmd))
+    app.add_handler(CommandHandler("close", close_cmd))
     app.add_handler(CommandHandler("volunteers", volunteers_cmd))
     app.add_handler(CommandHandler("requests", requests_cmd))
     app.add_handler(CommandHandler("block", block_cmd))
@@ -1340,6 +1438,7 @@ def main():
     app.add_handler(CallbackQueryHandler(approve_request, pattern="^okreq_"))
     app.add_handler(CallbackQueryHandler(decline_request, pattern="^noreq_"))
     app.add_handler(CallbackQueryHandler(admin_cancel, pattern="^adminx_"))
+    app.add_handler(CallbackQueryHandler(support_open_cb, pattern="^supop_"))
 
     # ловит "имя" после шаринга номера; регистрируется последним, чтобы не перехватывать
     # нажатия обычных кнопок меню — сам себя выключает, если пользователь не в процессе регистрации
