@@ -1058,6 +1058,11 @@ async def on_startup(app: Application):
     main_loop = asyncio.get_running_loop()
     try:
         BOT_USERNAME = (await app.bot.get_me()).username or ""
+        # Кладём имя в базу: приложение берёт его оттуда и всегда собирает
+        # ссылку-приглашение на бота. Раньше имя приходило только в ?bot=,
+        # и при заходе через кнопку меню приглашение вело на голый сайт.
+        if BOT_USERNAME:
+            db.reference("config/bot").set(BOT_USERNAME)
     except Exception as e:
         log.warning(f"не удалось узнать имя бота: {e}")
     # Кнопка меню рядом с полем ввода ведёт на тот же URL, что и кнопки в чате —
