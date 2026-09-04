@@ -319,7 +319,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines += ["", "Цифры пилота: /stats",
               "Заявки сейчас: /orders",
               "Человек: /user <id|телефон|имя>",
-              "Написать: /say <кто> <текст> · закрыть диалог: /close <кто>",
+              "Разговоры: /chats · написать: /say <кто> <текст>",
               "Ещё: /volunteers /requests /invite /invites /block /doc"]
     await update.message.reply_text("\n".join(lines))
 
@@ -626,17 +626,23 @@ async def say_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (ValueError, TypeError):
         await update.message.reply_text("Этот человек пришёл не из Telegram — написать не получится.")
 
-def _begin_chat(admin_uid: str, target: str) -> str:
+def _begin_chat(admin_uid: str, target: str, greet: bool = True) -> str:
     """Открыть разговор и сделать его текущим для организатора."""
     u = get_user(target) or {}
-    support_open(target, admin_uid)
+    was_open = support_is_open(target)
+    if not was_open:
+        support_open(target, admin_uid)
     admin_set_target(admin_uid, target)
-    try:
-        send_async(int(target),
-                   "✉️ Организатор Qulay на связи — напишите, что случилось. "
-                   "Просто отправьте сообщение сюда.")
-    except (ValueError, TypeError):
-        pass
+    db.reference(f"support/{target}/unread").set(0)   # переключились — прочитано
+    # здороваемся только когда линия действительно открывается: при простом
+    # переключении между разговорами человека дёргать незачем
+    if greet and not was_open:
+        try:
+            send_async(int(target),
+                       "✉️ Организатор Qulay на связи — напишите, что случилось. "
+                       "Просто отправьте сообщение сюда.")
+        except (ValueError, TypeError):
+            pass
     return u.get("name", "—")
 
 async def say_open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -665,6 +671,39 @@ async def say_open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💬 Разговор с {name}\n\n"
         "Просто пишите сообщения — они уйдут ему.\n"
         f"Закончить: /close_{target}")
+
+async def chats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Все открытые разговоры разом — с кем говорим сейчас, кто ждёт ответа."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    sessions = db.reference("support").get() or {}
+    cur = admin_target(uid)
+    rows = []
+    for tid, s in sessions.items():
+        if not isinstance(s, dict) or not s.get("open"):
+            continue
+        if not support_is_open(tid):      # заодно подчищает протухшие
+            continue
+        u = get_user(tid) or {}
+        rows.append((s.get("lastAt") or 0, tid, u, s.get("unread") or 0))
+    if not rows:
+        await update.message.reply_text(
+            "Открытых разговоров нет.\n"
+            "Начать: /user <телефон или имя> — в карточке будет /say_id")
+        return
+    rows.sort(reverse=True)
+    lines = ["💬 Разговоры", ""]
+    for last, tid, u, unread in rows:
+        mins = round((int(datetime.now().timestamp() * 1000) - last) / 60000) if last else 0
+        mark = "▶️ " if tid == cur else ""
+        bell = f" · {unread} новых" if unread and tid != cur else ""
+        who = "волонтёр" if u.get("role") == "volunteer" else "житель"
+        lines.append(f"{mark}{u.get('name','—')} ({who}){bell}")
+        lines.append(f"    молчит {mins} мин · /say_{tid} · /close_{tid}")
+    lines += ["", "▶️ — с кем вы говорите сейчас. Обычный текст уходит ему."]
+    await update.message.reply_text("\n".join(lines))
 
 async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Завершить сеанс — дальше человек писать напрямую не сможет.
@@ -862,23 +901,40 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     db.reference(f"support/{tgt}/lastAt").set(
                         int(datetime.now().timestamp() * 1000))
                     await update.message.reply_text(
-                        f"→ {u.get('name','—')} ✓   ·   закончить: /close_{tgt}")
+                        f"→ {u.get('name','—')} ✓   ·   /chats   ·   /close_{tgt}")
                 except (ValueError, TypeError):
                     await update.message.reply_text("Не получилось отправить.")
                 return
         if support_is_open(uid):
             u = get_user(uid) or {}
             who = "волонтёр" if u.get("role") == "volunteer" else "житель"
-            text = (f"💬 {u.get('name','—')} ({who}) · {u.get('phone','')}\n\n"
-                    f"{update.message.text}\n\n"
-                    f"Ответить: /say_{uid}   ·   закончить: /close_{uid}")
             db.reference(f"support/{uid}/lastAt").set(int(datetime.now().timestamp() * 1000))
             for aid in ADMIN_IDS:
+                # если организатор сейчас говорит с другим — не даём ему
+                # случайно ответить не туда: помечаем письмо и предлагаем
+                # переключиться одним нажатием
+                focused = admin_target(aid) == uid
+                head = (f"💬 {u.get('name','—')} ({who}) · {u.get('phone','')}"
+                        if focused else
+                        f"📨 Другой разговор — {u.get('name','—')} ({who}) · {u.get('phone','')}")
+                tail = ("Отвечайте прямо здесь   ·   закончить: /close_" + uid
+                        if focused else
+                        f"Переключиться: /say_{uid}   ·   все разговоры: /chats")
                 try:
-                    send_async(int(aid), text)
+                    send_async(int(aid), f"{head}\n\n{update.message.text}\n\n{tail}")
                 except (ValueError, TypeError):
                     pass
+                if not focused:
+                    db.reference(f"support/{uid}/unread").transaction(lambda c: (c or 0) + 1)
             await update.message.reply_text("Передал организатору ✓")
+            return
+        # человек пишет боту просто так: раньше сообщение уходило в пустоту и
+        # он не понимал, услышали его или нет
+        if db.reference(f"users/{uid}/phone").get():
+            await update.message.reply_text(
+                "Я передаю сообщения организатору только когда разговор открыт.\n"
+                "Если что-то случилось во время заявки — нажмите «Что-то не так» "
+                "в приложении, и организатор напишет вам сюда.")
         return  # не в процессе регистрации — пусть обработают другие хендлеры
     pending_role = db.reference(f"users/{uid}/pendingRole").get() or "client"
     pending_name = db.reference(f"users/{uid}/pendingName").get()
@@ -1483,6 +1539,7 @@ def main():
     app.add_handler(CommandHandler("user", user_cmd))
     app.add_handler(CommandHandler("say", say_cmd))
     app.add_handler(CommandHandler("close", close_cmd))
+    app.add_handler(CommandHandler("chats", chats_cmd))
     # /say_5730011770 и /close_5730011770 — нажимаются прямо в чате одним касанием.
     # CommandHandler("say") их не ловит: для Telegram это команда "say_5730011770".
     app.add_handler(MessageHandler(filters.Regex(r"^/(say|close)_\w+"), say_open_cmd))
