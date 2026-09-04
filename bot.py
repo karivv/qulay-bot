@@ -596,6 +596,11 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= ЖИЛЕЦ: НОВАЯ ЗАЯВКА =================
 async def new_order_start(update, context):
+    if not is_open_now():
+        await update.message.reply_text(
+            f"🌙 Сейчас закрыто. {OPEN_HOURS_TEXT}.\n"
+            f"Оставьте заявку утром — с {OPEN_H}:00 волонтёры снова на связи.")
+        return ConversationHandler.END
     context.user_data["order"] = {}
     await update.message.reply_text("Номер дома?", reply_markup=ReplyKeyboardRemove())
     return HOUSE
@@ -938,6 +943,12 @@ def start_firebase_listener():
     threading.Thread(target=_msgs, daemon=True).start()
 
 LEAD_MIN = 40           # за столько минут до назначенного времени будим волонтёров
+OPEN_H, CLOSE_H = 7, 21  # часы работы сервиса
+
+def is_open_now() -> bool:
+    return OPEN_H <= datetime.now().hour < CLOSE_H
+
+OPEN_HOURS_TEXT = f"Сервис работает с {OPEN_H}:00 до {CLOSE_H}:00"
 
 def order_due_at(o: dict):
     """Момент, к которому житель просил забрать мусор. None — «сейчас».
@@ -990,6 +1001,21 @@ def sweep_stale_orders():
         if status in ("done", "cancelled"):
             continue
         if status == "open":
+            # сервис закрылся, а заявку так и не взяли: держать её до утра нечестно —
+            # житель всю ночь думает, что за мусором идут. Уже взятые заявки
+            # (taken/arrived/picked) закрытие не трогает, волонтёр их доводит.
+            if not is_open_now():
+                db.reference(f"orders/{oid}").update({
+                    "status": "cancelled", "cancelledBy": "schedule"})
+                log.info(f"заявка {oid} закрыта: сервис не работает")
+                try:
+                    send_async(int(o.get("clientId")),
+                               f"🌙 Извините, волонтёр не нашёлся до {CLOSE_H}:00.\n"
+                               f"{OPEN_HOURS_TEXT} — оставьте заявку утром, "
+                               "с утра волонтёров обычно больше.")
+                except (ValueError, TypeError):
+                    pass
+                continue
             if now - (o.get("createdAt") or now) > orphan_ms:
                 db.reference(f"orders/{oid}").update({"status": "cancelled"})
                 log.info(f"заявка {oid} закрыта: сутки без волонтёра")
