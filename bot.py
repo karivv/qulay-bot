@@ -316,7 +316,10 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
               f"✉️ Запросов на приглашение: {len(pending)}"]
     if pending:
         lines.append("Посмотреть: /requests")
-    lines += ["", "Команды: /volunteers /requests /invite /invites"]
+    lines += ["", "Цифры пилота: /stats",
+              "Заявки сейчас: /orders",
+              "Человек: /user <id|телефон|имя> · написать: /say <кто> <текст>",
+              "Ещё: /volunteers /requests /invite /invites /block /doc"]
     await update.message.reply_text("\n".join(lines))
 
 def _find_user(needle: str):
@@ -397,6 +400,175 @@ async def doc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not sent:
         await update.message.reply_text(
             f"{u.get('name','—')}: фото и документ не загружены.")
+
+def _median(xs):
+    if not xs:
+        return None
+    xs = sorted(xs)
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+def _mins(ms):
+    return f"{round(ms / 60000)} мин" if ms is not None else "—"
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Цифры, по которым видно, живой пилот или нет: сколько заявок в день,
+    как быстро их разбирают и какая доля вообще осталась без волонтёра.
+    Без этого решение «работает / не работает» принимать не на чем."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    orders = db.reference("orders").get() or {}
+    now = int(datetime.now().timestamp() * 1000)
+    day = 86400000
+
+    per_day = {}
+    to_taken, to_done, kg_total = [], [], 0
+    lost = done = total = 0
+    vols_week = set()
+    for o in orders.values():
+        if not isinstance(o, dict):
+            continue
+        created = o.get("createdAt") or 0
+        if not created:
+            continue
+        total += 1
+        age_days = int((now - created) // day)
+        if age_days < 7:
+            per_day[age_days] = per_day.get(age_days, 0) + 1
+        st = o.get("status")
+        if st == "done":
+            done += 1
+            kg_total += o.get("kg") or 3
+            if o.get("takenAt"):
+                to_taken.append(o["takenAt"] - created)
+                if o.get("doneAt"):
+                    to_done.append(o["doneAt"] - o["takenAt"])
+            if o.get("volunteerId") and now - created < 7 * day:
+                vols_week.add(str(o["volunteerId"]))
+        elif st == "cancelled" and not o.get("volunteerId"):
+            lost += 1
+
+    lines = ["📈 Пилот — цифры", ""]
+    lines.append(f"Всего заявок: {total} · закрыто {done}")
+    if total:
+        lines.append(f"Осталось без волонтёра: {lost} ({round(lost * 100 / total)}%)")
+    lines += ["", "По дням (0 = сегодня):"]
+    for d in range(7):
+        n = per_day.get(d, 0)
+        lines.append(f"   {d}: {'▇' * min(n, 20)}{'' if n else '·'} {n}")
+    lines += ["", "Скорость:",
+              f"   до взятия — медиана {_mins(_median(to_taken))}",
+              f"   в работе  — медиана {_mins(_median(to_done))}"]
+    lines += ["", f"Волонтёров работало за неделю: {len(vols_week)}",
+              f"Вынесено: ≈{kg_total} кг"]
+    await update.message.reply_text("\n".join(lines))
+
+async def orders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Что прямо сейчас в работе — с кнопкой закрыть вручную.
+    Нужно, когда заявка зависла, а сторож ещё не дошёл до неё."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    orders = db.reference("orders").get() or {}
+    live = [(oid, o) for oid, o in orders.items()
+            if isinstance(o, dict) and o.get("status") in ("open", "taken", "arrived", "picked")]
+    if not live:
+        await update.message.reply_text("Сейчас активных заявок нет.")
+        return
+    live.sort(key=lambda kv: kv[1].get("createdAt", 0))
+    now = int(datetime.now().timestamp() * 1000)
+    for oid, o in live[:15]:
+        mins = round((now - (o.get("createdAt") or now)) / 60000)
+        who = o.get("volunteerName") or "—"
+        text = (f"{STATUS_LABEL.get(o.get('status'), o.get('status'))} · {mins} мин\n"
+                f"{order_text(o)}\n"
+                f"Житель: {o.get('clientName','—')} · {o.get('clientPhone','')}\n"
+                f"Волонтёр: {who} · {o.get('volunteerPhone','')}")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "❌ Отменить заявку", callback_data=f"adminx_{oid}")]])
+        await update.message.reply_text(text, reply_markup=kb)
+
+async def admin_cancel(update, context):
+    query = update.callback_query
+    uid = str(query.from_user.id)
+    if not is_admin(uid):
+        await query.answer("Только для организатора")
+        return
+    oid = query.data.replace("adminx_", "")
+    o = db.reference(f"orders/{oid}").get() or {}
+    db.reference(f"orders/{oid}").update({
+        "status": "cancelled", "cancelledBy": "admin"})
+    await query.answer("Отменена")
+    await query.edit_message_text(query.message.text + "\n\n❌ Отменена организатором")
+    for side in ("clientId", "volunteerId"):
+        if o.get(side):
+            try:
+                send_async(int(o[side]), "❌ Организатор отменил заявку.")
+            except (ValueError, TypeError):
+                pass
+
+async def user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Полная карточка одного человека — что о нём вообще известно."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    if not context.args:
+        await update.message.reply_text("Кого? /user 5730011770 или /user Азиза")
+        return
+    target, u = _find_user(" ".join(context.args))
+    if not target:
+        await update.message.reply_text("Не нашёл такого человека.")
+        return
+    b = db.reference(f"leaderboard/{target}").get() or {}
+    orders = db.reference("orders").get() or {}
+    as_cl = sum(1 for o in orders.values()
+                if isinstance(o, dict) and str(o.get("clientId")) == target)
+    as_vo = sum(1 for o in orders.values()
+                if isinstance(o, dict) and str(o.get("volunteerId")) == target)
+    avg = (b.get("ratingSum") or 0) / (b.get("ratingCount") or 1) if b.get("ratingCount") else None
+    lines = [
+        f"👤 {u.get('name','—')} · {u.get('phone','')}",
+        f"ID: {target}",
+        f"Роль: {'волонтёр' if u.get('role') == 'volunteer' else 'житель'}"
+        + (" · ⛔️ заблокирован" if u.get("blocked") else ""),
+        f"Дом/район: {u.get('house') or u.get('district') or '—'}",
+        "",
+        f"Заявок как житель: {as_cl} · как волонтёр: {as_vo}",
+        f"Очки: {b.get('points', 0)} · закрыто: {b.get('ordersCompleted', 0)}",
+        f"Оценка: {round(avg, 2) if avg else '—'} ({b.get('ratingCount', 0)} оценок)",
+        f"Фото: {'есть' if u.get('hasPhoto') else 'нет'} · "
+        f"документ: {'есть' if u.get('hasDoc') else 'нет'}",
+    ]
+    if u.get("invitedBy"):
+        inv = get_user(str(u["invitedBy"])) or {}
+        lines.append(f"Пригласил: {inv.get('name','—')}")
+    lines.append("")
+    lines.append(f"Команды: /block {target} · /doc {target} · /say {target} текст")
+    await update.message.reply_text("\n".join(lines))
+
+async def say_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Написать человеку от имени сервиса, не выходя из бота."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        await update.message.reply_text("Эта команда только для организатора.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Как: /say 5730011770 Добрый день, ваш код 1234")
+        return
+    target, u = _find_user(context.args[0])
+    if not target:
+        await update.message.reply_text("Не нашёл такого человека.")
+        return
+    text = " ".join(context.args[1:])
+    try:
+        send_async(int(target), f"✉️ Сообщение от организатора Qulay:\n\n{text}")
+        await update.message.reply_text(f"Отправлено: {u.get('name','—')}")
+    except (ValueError, TypeError):
+        await update.message.reply_text("Этот человек пришёл не из Telegram — написать не получится.")
 
 async def volunteers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -1089,6 +1261,10 @@ def main():
     app.add_handler(CommandHandler("invite", invite_cmd))
     app.add_handler(CommandHandler("invites", invites_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("orders", orders_cmd))
+    app.add_handler(CommandHandler("user", user_cmd))
+    app.add_handler(CommandHandler("say", say_cmd))
     app.add_handler(CommandHandler("volunteers", volunteers_cmd))
     app.add_handler(CommandHandler("requests", requests_cmd))
     app.add_handler(CommandHandler("block", block_cmd))
@@ -1122,6 +1298,7 @@ def main():
     app.add_handler(CallbackQueryHandler(drop_order, pattern="^drop_"))
     app.add_handler(CallbackQueryHandler(approve_request, pattern="^okreq_"))
     app.add_handler(CallbackQueryHandler(decline_request, pattern="^noreq_"))
+    app.add_handler(CallbackQueryHandler(admin_cancel, pattern="^adminx_"))
 
     # ловит "имя" после шаринга номера; регистрируется последним, чтобы не перехватывать
     # нажатия обычных кнопок меню — сам себя выключает, если пользователь не в процессе регистрации
