@@ -486,8 +486,10 @@ async def orders_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         who = o.get("volunteerName") or "—"
         text = (f"{STATUS_LABEL.get(o.get('status'), o.get('status'))} · {mins} мин\n"
                 f"{order_text(o)}\n"
-                f"Житель: {o.get('clientName','—')} · {o.get('clientPhone','')}\n"
-                f"Волонтёр: {who} · {o.get('volunteerPhone','')}")
+                f"Житель: {o.get('clientName','—')} · {o.get('clientPhone','')}"
+                + (f" · /say_{o['clientId']}" if o.get("clientId") else "") + "\n"
+                f"Волонтёр: {who} · {o.get('volunteerPhone','')}"
+                + (f" · /say_{o['volunteerId']}" if o.get("volunteerId") else ""))
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(
             "❌ Отменить заявку", callback_data=f"adminx_{oid}")]])
         await update.message.reply_text(text, reply_markup=kb)
@@ -548,7 +550,8 @@ async def user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         inv = get_user(str(u["invitedBy"])) or {}
         lines.append(f"Пригласил: {inv.get('name','—')}")
     lines.append("")
-    lines.append(f"Команды: /block {target} · /doc {target} · /say {target} текст")
+    lines.append(f"Написать: /say_{target}   ·   документ: /doc {target}")
+    lines.append(f"Заблокировать: /block {target}")
     await update.message.reply_text("\n".join(lines))
 
 # ================= ДИАЛОГ С ОРГАНИЗАТОРОМ =================
@@ -568,6 +571,17 @@ def support_open(uid: str, by: str):
 def support_close(uid: str):
     db.reference(f"support/{uid}").delete()
 
+def admin_target(admin_uid: str):
+    """С кем организатор разговаривает прямо сейчас. Лежит в базе, а не в
+    памяти: иначе рестарт бота посреди разговора терял бы собеседника."""
+    return db.reference(f"adminChat/{admin_uid}").get() or None
+
+def admin_set_target(admin_uid: str, target: str):
+    db.reference(f"adminChat/{admin_uid}").set(target)
+
+def admin_clear_target(admin_uid: str):
+    db.reference(f"adminChat/{admin_uid}").delete()
+
 def support_is_open(uid: str) -> bool:
     s = db.reference(f"support/{uid}").get()
     if not isinstance(s, dict) or not s.get("open"):
@@ -585,12 +599,19 @@ async def say_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(uid):
         await update.message.reply_text("Эта команда только для организатора.")
         return
-    if len(context.args) < 2:
-        await update.message.reply_text("Как: /say 5730011770 Добрый день, что случилось?")
+    if not context.args:
+        await update.message.reply_text(
+            "Как: /say 5730011770 текст — или просто нажмите /say_id из карточки.")
         return
     target, u = _find_user(context.args[0])
     if not target:
         await update.message.reply_text("Не нашёл такого человека.")
+        return
+    # без текста — просто открываем разговор, дальше можно писать без команды
+    if len(context.args) == 1:
+        name = _begin_chat(uid, target)
+        await update.message.reply_text(
+            f"💬 Разговор с {name}\n\nПросто пишите сообщения.\nЗакончить: /close_{target}")
         return
     text = " ".join(context.args[1:])
     try:
@@ -598,31 +619,80 @@ async def say_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    f"✉️ Организатор Qulay:\n\n{text}\n\n"
                    "— Можете ответить прямо здесь, просто напишите сообщение.")
         support_open(target, uid)
+        admin_set_target(uid, target)
         await update.message.reply_text(
             f"Отправлено: {u.get('name','—')}\n"
-            f"Диалог открыт — ответы придут сюда. Закрыть: /close {target}")
+            f"Дальше пишите без команды. Закончить: /close_{target}")
     except (ValueError, TypeError):
         await update.message.reply_text("Этот человек пришёл не из Telegram — написать не получится.")
 
+def _begin_chat(admin_uid: str, target: str) -> str:
+    """Открыть разговор и сделать его текущим для организатора."""
+    u = get_user(target) or {}
+    support_open(target, admin_uid)
+    admin_set_target(admin_uid, target)
+    try:
+        send_async(int(target),
+                   "✉️ Организатор Qulay на связи — напишите, что случилось. "
+                   "Просто отправьте сообщение сюда.")
+    except (ValueError, TypeError):
+        pass
+    return u.get("name", "—")
+
+async def say_open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/say_5730011770 — одно нажатие в чате, без копирования id.
+    Дальше организатор просто пишет сообщения, команду повторять не нужно."""
+    uid = str(update.effective_user.id)
+    if not is_admin(uid):
+        return
+    m = re.match(r"^/(say|close)_(\w+)", update.message.text or "")
+    if not m:
+        return
+    action, target = m.group(1), m.group(2)
+    if action == "close":
+        support_close(target)
+        if admin_target(uid) == target:
+            admin_clear_target(uid)
+        u = get_user(target) or {}
+        try:
+            send_async(int(target), "✅ Организатор завершил разговор. Спасибо!")
+        except (ValueError, TypeError):
+            pass
+        await update.message.reply_text(f"Диалог закрыт: {u.get('name','—')}")
+        return
+    name = _begin_chat(uid, target)
+    await update.message.reply_text(
+        f"💬 Разговор с {name}\n\n"
+        "Просто пишите сообщения — они уйдут ему.\n"
+        f"Закончить: /close_{target}")
+
 async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Завершить сеанс — дальше человек писать напрямую не сможет."""
+    """Завершить сеанс — дальше человек писать напрямую не сможет.
+    Без аргумента закрывает текущий разговор."""
     uid = str(update.effective_user.id)
     if not is_admin(uid):
         await update.message.reply_text("Эта команда только для организатора.")
         return
-    if not context.args:
-        await update.message.reply_text("Кого закрыть? /close 5730011770")
-        return
-    target, u = _find_user(" ".join(context.args))
-    if not target:
-        await update.message.reply_text("Не нашёл такого человека.")
-        return
+    if context.args:
+        target, u = _find_user(" ".join(context.args))
+        if not target:
+            await update.message.reply_text("Не нашёл такого человека.")
+            return
+        name = u.get("name", "—")
+    else:
+        target = admin_target(uid)
+        if not target:
+            await update.message.reply_text("Сейчас нет открытого разговора.")
+            return
+        name = (get_user(target) or {}).get("name", "—")
     support_close(target)
+    if admin_target(uid) == target:
+        admin_clear_target(uid)
     try:
         send_async(int(target), "✅ Организатор завершил разговор. Спасибо!")
     except (ValueError, TypeError):
         pass
-    await update.message.reply_text(f"Диалог закрыт: {u.get('name','—')}")
+    await update.message.reply_text(f"Диалог закрыт: {name}")
 
 async def support_open_cb(update, context):
     """Кнопка «Ответить» под жалобой — сразу открывает сеанс."""
@@ -632,19 +702,12 @@ async def support_open_cb(update, context):
         await query.answer("Только для организатора")
         return
     target = query.data.replace("supop_", "")
-    u = get_user(target) or {}
-    support_open(target, uid)
+    name = _begin_chat(uid, target)
     await query.answer("Диалог открыт")
-    try:
-        send_async(int(target),
-                   "✉️ Организатор Qulay на связи — напишите, что случилось. "
-                   "Просто отправьте сообщение сюда.")
-    except (ValueError, TypeError):
-        pass
     await query.edit_message_text(
         query.message.text
-        + f"\n\n💬 Диалог открыт с {u.get('name','—')}."
-          f"\nОтветить: /say {target} текст\nЗакрыть: /close {target}")
+        + f"\n\n💬 Разговор с {name} открыт — просто пишите сообщения."
+          f"\nЗакончить: /close_{target}")
 
 async def volunteers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -787,12 +850,28 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # не регистрация — но, может быть, идёт разговор с организатором.
         # Отдельный MessageHandler тут заводить нельзя: второй широкий
         # filters.TEXT начал бы перехватывать кнопки меню.
+        if is_admin(uid):
+            # организатор в открытом разговоре пишет обычным текстом,
+            # без /say и без id — команду хватило нажать один раз
+            tgt = admin_target(uid)
+            if tgt:
+                u = get_user(tgt) or {}
+                try:
+                    send_async(int(tgt),
+                               f"✉️ Организатор Qulay:\n\n{update.message.text}")
+                    db.reference(f"support/{tgt}/lastAt").set(
+                        int(datetime.now().timestamp() * 1000))
+                    await update.message.reply_text(
+                        f"→ {u.get('name','—')} ✓   ·   закончить: /close_{tgt}")
+                except (ValueError, TypeError):
+                    await update.message.reply_text("Не получилось отправить.")
+                return
         if support_is_open(uid):
             u = get_user(uid) or {}
             who = "волонтёр" if u.get("role") == "volunteer" else "житель"
             text = (f"💬 {u.get('name','—')} ({who}) · {u.get('phone','')}\n\n"
                     f"{update.message.text}\n\n"
-                    f"Ответить: /say {uid} текст · Закрыть: /close {uid}")
+                    f"Ответить: /say_{uid}   ·   закончить: /close_{uid}")
             db.reference(f"support/{uid}/lastAt").set(int(datetime.now().timestamp() * 1000))
             for aid in ADMIN_IDS:
                 try:
@@ -1404,6 +1483,9 @@ def main():
     app.add_handler(CommandHandler("user", user_cmd))
     app.add_handler(CommandHandler("say", say_cmd))
     app.add_handler(CommandHandler("close", close_cmd))
+    # /say_5730011770 и /close_5730011770 — нажимаются прямо в чате одним касанием.
+    # CommandHandler("say") их не ловит: для Telegram это команда "say_5730011770".
+    app.add_handler(MessageHandler(filters.Regex(r"^/(say|close)_\w+"), say_open_cmd))
     app.add_handler(CommandHandler("volunteers", volunteers_cmd))
     app.add_handler(CommandHandler("requests", requests_cmd))
     app.add_handler(CommandHandler("block", block_cmd))
