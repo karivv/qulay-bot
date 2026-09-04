@@ -40,7 +40,8 @@ from firebase_admin import credentials, db
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo
+    KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo,
+    MenuButtonWebApp
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -963,6 +964,15 @@ async def on_startup(app: Application):
         BOT_USERNAME = (await app.bot.get_me()).username or ""
     except Exception as e:
         log.warning(f"не удалось узнать имя бота: {e}")
+    # Кнопка меню рядом с полем ввода ведёт на тот же URL, что и кнопки в чате —
+    # с bot=, иначе приложение не знает имени бота и «Поделиться» отдаёт
+    # ссылку на сайт вместо ссылки на бота.
+    try:
+        await app.bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="Qulay", web_app=WebAppInfo(url=app_url("client")))
+        )
+    except Exception as e:
+        log.warning(f"не удалось настроить кнопку меню: {e}")
     start_firebase_listener()
     start_stale_sweeper()
     log.info("Firebase listener и сторож зависших заявок запущены")
