@@ -68,16 +68,291 @@ log = logging.getLogger(__name__)
 
 HOUSE, ENTRANCE, FLOOR, FLAT, NOTE, BAGS = range(6)
 
-BAG_OPTIONS = ["Один пакет", "Два-три пакета", "Крупный мусор", "Стекло / банки"]
+# ================= ЯЗЫКИ =================
+# Все тексты, которые видит обычный пользователь, живут здесь — по одному
+# ключу на фразу, ru и uz рядом. Консоль организатора (/admin, /stats,
+# /orders, /user, /chats) намеренно осталась русской: её видит только
+# организатор, и переводить её — лишний код без пользы.
+LANGS = ("ru", "uz")
+DEFAULT_LANG = "ru"
 
-STATUS_LABEL = {
-    "open": "🟡 Ищем волонтёра",
-    "taken": "🟢 Волонтёр в пути",
-    "arrived": "🚪 Волонтёр у двери",
-    "picked": "📦 Несёт до контейнера",
-    "done": "✅ Готово",
-    "cancelled": "❌ Отменена",
+T = {
+"ru": {
+    # выбор языка
+    "lang_saved": "Готово! Язык — русский.",
+    "lang_ask": "Выберите язык / Tilni tanlang",
+    "btn_lang_ru": "Русский",
+    "btn_lang_uz": "O‘zbekcha",
+    "lang_hint": "Сменить язык можно командой /lang",
+    # старт и регистрация
+    "welcome_back": "С возвращением, {name}!",
+    "app_cta": "Заявки и статус — прямо в приложении:",
+    "hello": "Привет! Это Qulay — вывоз мусора с помощью волонтёров.\n\n"
+             "Поделитесь номером, чтобы продолжить:",
+    "btn_share_phone": "📱 Поделиться номером",
+    "share_own_phone": "Пожалуйста, поделитесь именно своим номером.",
+    "ask_name": "Как вас записать? Жильцы и волонтёры увидят именно это имя.",
+    "name_short": "Имя слишком короткое, напишите ещё раз.",
+    "ask_house": "В каком доме вы живёте? (номер или название)",
+    "ask_district": "В каком районе/махалле вы обычно волонтёрите?",
+    "place_short": "Напишите хотя бы коротко.",
+    "reg_done": "Готово, {name}! Роль: {role}",
+    "role_volunteer": "Волонтёр",
+    "role_client": "Жилец",
+    "open_here": "Открывайте заявки прямо здесь:",
+    "btn_open_app": "📦 Открыть приложение",
+    "btn_open_app_vol": "🚶 Открыть приложение",
+    # приглашения
+    "already_volunteer": "Вы уже волонтёр — код не нужен.",
+    "code_bad": "Код приглашения недействителен или уже использован.\n"
+                "Чтобы стать волонтёром, попросите новый код у организатора и наберите:\n"
+                "/start vol_КОД",
+    "code_ok_upgrade": "Код принят! Теперь вы волонтёр — история ваших заявок как жителя "
+                       "никуда не денется, просто интерфейс переключится на волонтёрский.\n\n"
+                       "В каком районе/махалле вы обычно будете волонтёрить?",
+    "upgrade_done": "Готово! Теперь вы волонтёр в районе «{district}».",
+    "someone_joined": "🏡 По вашей ссылке зарегистрировался {name} · {phone}",
+    # кнопки меню
+    "btn_new_order": "📦 Оставить заявку",
+    "btn_my_orders": "📋 Мои заявки",
+    "btn_onair": "🟢 Вы на связи",
+    "btn_orders_near": "🗺 Заявки рядом",
+    "btn_my_jobs": "📦 Мои заявки",
+    # создание заявки
+    "closed_now": "🌙 Сейчас закрыто. {hours}.\n"
+                  "Оставьте заявку утром — с {open_h}:00 волонтёры снова на связи.",
+    "ask_house_num": "Номер дома?",
+    "ask_entrance": "Подъезд?",
+    "ask_floor": "Этаж?",
+    "ask_flat": "Квартира?",
+    "ask_note": "Комментарий (например, код домофона). Если нет — «-»",
+    "ask_bags": "Что выносим?",
+    "order_sent": "Заявка отправлена волонтёрам ✅",
+    "cancelled": "Отменено.",
+    "no_orders": "Пока нет заявок.",
+    "no_jobs": "Пока нет принятых заявок.",
+    # виды мусора
+    "bag_one": "Один пакет",
+    "bag_few": "Два-три пакета",
+    "bag_big": "Крупный мусор",
+    "bag_glass": "Стекло / банки",
+    # волонтёр
+    "onair_on": "Вы на связи 🟢 — пришлём уведомление о новой заявке",
+    "onair_off": "Уведомления выключены 🔕",
+    "no_open_orders": "Открытых заявок сейчас нет.",
+    "btn_take": "✅ Взять заявку",
+    "took_it": "Заявка ваша ✓",
+    "too_late": "Заявку уже взял другой волонтёр",
+    "taken_note": "❌ Уже занято",
+    "btn_arrived": "🚪 Я на месте",
+    "btn_picked": "📦 Пакет забрал",
+    "btn_drop": "↩️ Не смогу выполнить",
+    "btn_done": "✅ Готово",
+    "dropped": "Заявка возвращена",
+    "dropped_note": "↩️ Вы вернули заявку другим волонтёрам",
+    "drop_too_late": "Эту заявку уже нельзя вернуть",
+    "done_ok": "Готово ✓",
+    "done_note": "✅ Заявка закрыта. Спасибо!",
+    # адрес заявки
+    "addr_short": "Дом {house}",
+    "addr_full": "Дом {house}, кв. {flat}",
+    "addr_entrance": "Подъезд {entrance}, этаж {floor}",
+    "addr_locked": "🔒 Точный адрес — после того, как возьмёте заявку",
+    # статусы
+    "st_open": "🟡 Ищем волонтёра",
+    "st_taken": "🟢 Волонтёр в пути",
+    "st_arrived": "🚪 Волонтёр у двери",
+    "st_picked": "📦 Несёт до контейнера",
+    "st_done": "✅ Готово",
+    "st_cancelled": "❌ Отменена",
+    # уведомления
+    "new_order": "🔔 Новая заявка рядом",
+    "order_free": "🔁 Заявка снова свободна",
+    "order_due": "🕓 Скоро время заявки",
+    "order_help": "🔔 Заявку никто не взял — нужна помощь",
+    "vol_gone": "🔎 Волонтёр не смог прийти — ищем другого.",
+    "client_cancelled": "❌ Житель отменил заявку — идти не нужно.",
+    "btn_open_order": "📱 Открыть заявку",
+    "closed_cancel": "🌙 Извините, волонтёр не нашёлся до {close_h}:00.\n"
+                     "{hours} — оставьте заявку утром, с утра волонтёров обычно больше.",
+    "orphan_cancel": "⌛️ Заявку закрыли — за сутки никто не смог её взять.\n"
+                     "Попробуйте оставить новую — волонтёров бывает больше по вечерам.",
+    "hours_text": "Сервис работает с {open_h}:00 до {close_h}:00",
+    # связь с организатором и между сторонами
+    "msg_from": "💬 {who} {name}:",
+    "who_client": "Житель",
+    "who_volunteer": "Волонтёр",
+    "admin_says": "✉️ Организатор Qulay:",
+    "admin_says_reply": "✉️ Организатор Qulay:\n\n{text}\n\n"
+                        "— Можете ответить прямо здесь, просто напишите сообщение.",
+    "admin_online": "✉️ Организатор Qulay на связи — напишите, что случилось. "
+                    "Просто отправьте сообщение сюда.",
+    "admin_closed": "✅ Организатор завершил разговор. Спасибо!",
+    "passed_on": "Передал организатору ✓",
+    "no_session": "Я передаю сообщения организатору только когда разговор открыт.\n"
+                  "Если что-то случилось во время заявки — нажмите «Что-то не так» "
+                  "в приложении, и организатор напишет вам сюда.",
+    # блокировка
+    "blocked": "⛔️ Организатор временно закрыл вам доступ к Qulay.",
+    "unblocked": "✅ Доступ к Qulay возвращён.",
+    "admin_cancelled": "❌ Организатор отменил заявку.",
+    "code_ready": "✅ Код для {name} готов.\nПерешлите ему эту ссылку:\n{link}",
+    "code_declined": "Организатор пока не выдал код для {name}.",
+},
+"uz": {
+    "lang_saved": "Tayyor! Til — o‘zbekcha.",
+    "lang_ask": "Выберите язык / Tilni tanlang",
+    "btn_lang_ru": "Русский",
+    "btn_lang_uz": "O‘zbekcha",
+    "lang_hint": "Tilni /lang buyrug‘i bilan o‘zgartirsa bo‘ladi",
+    "welcome_back": "Xush kelibsiz, {name}!",
+    "app_cta": "Buyurtmalar va holat — ilovada:",
+    "hello": "Salom! Bu Qulay — ko‘ngillilar yordamida chiqindi chiqarish.\n\n"
+             "Davom etish uchun raqamingizni yuboring:",
+    "btn_share_phone": "📱 Raqamni yuborish",
+    "share_own_phone": "Iltimos, aynan o‘z raqamingizni yuboring.",
+    "ask_name": "Ismingizni qanday yozamiz? Yashovchilar va ko‘ngillilar shu ismni ko‘radi.",
+    "name_short": "Ism juda qisqa, yana bir bor yozing.",
+    "ask_house": "Qaysi uyda yashaysiz? (raqami yoki nomi)",
+    "ask_district": "Odatda qaysi tuman/mahallada ko‘ngillilik qilasiz?",
+    "place_short": "Hech bo‘lmasa qisqacha yozing.",
+    "reg_done": "Tayyor, {name}! Rol: {role}",
+    "role_volunteer": "Ko‘ngilli",
+    "role_client": "Yashovchi",
+    "open_here": "Buyurtmalarni shu yerdan oching:",
+    "btn_open_app": "📦 Ilovani ochish",
+    "btn_open_app_vol": "🚶 Ilovani ochish",
+    "already_volunteer": "Siz allaqachon ko‘ngillisiz — kod kerak emas.",
+    "code_bad": "Taklif kodi yaroqsiz yoki allaqachon ishlatilgan.\n"
+                "Ko‘ngilli bo‘lish uchun tashkilotchidan yangi kod so‘rang va yozing:\n"
+                "/start vol_KOD",
+    "code_ok_upgrade": "Kod qabul qilindi! Endi siz ko‘ngillisiz — yashovchi sifatidagi "
+                       "buyurtmalar tarixingiz saqlanib qoladi, faqat interfeys "
+                       "ko‘ngillinikiga o‘zgaradi.\n\n"
+                       "Odatda qaysi tuman/mahallada ko‘ngillilik qilasiz?",
+    "upgrade_done": "Tayyor! Endi siz «{district}» hududida ko‘ngillisiz.",
+    "someone_joined": "🏡 Havolangiz orqali {name} ro‘yxatdan o‘tdi · {phone}",
+    "btn_new_order": "📦 Buyurtma qoldirish",
+    "btn_my_orders": "📋 Mening buyurtmalarim",
+    "btn_onair": "🟢 Aloqadasiz",
+    "btn_orders_near": "🗺 Yaqindagi buyurtmalar",
+    "btn_my_jobs": "📦 Mening ishlarim",
+    "closed_now": "🌙 Hozir yopiq. {hours}.\n"
+                  "Buyurtmani ertalab qoldiring — soat {open_h}:00 dan ko‘ngillilar yana aloqada.",
+    "ask_house_num": "Uy raqami?",
+    "ask_entrance": "Podez?",
+    "ask_floor": "Qavat?",
+    "ask_flat": "Xonadon?",
+    "ask_note": "Izoh (masalan, domofon kodi). Bo‘lmasa — «-»",
+    "ask_bags": "Nima chiqaramiz?",
+    "order_sent": "Buyurtma ko‘ngillilarga yuborildi ✅",
+    "cancelled": "Bekor qilindi.",
+    "no_orders": "Hozircha buyurtma yo‘q.",
+    "no_jobs": "Hozircha olingan buyurtma yo‘q.",
+    "bag_one": "Bitta paket",
+    "bag_few": "Ikki-uchta paket",
+    "bag_big": "Yirik chiqindi",
+    "bag_glass": "Shisha / bankalar",
+    "onair_on": "Siz aloqadasiz 🟢 — yangi buyurtma haqida xabar yuboramiz",
+    "onair_off": "Bildirishnomalar o‘chirildi 🔕",
+    "no_open_orders": "Hozir ochiq buyurtmalar yo‘q.",
+    "btn_take": "✅ Buyurtmani olish",
+    "took_it": "Buyurtma sizniki ✓",
+    "too_late": "Buyurtmani boshqa ko‘ngilli olib ulgurdi",
+    "taken_note": "❌ Allaqachon band",
+    "btn_arrived": "🚪 Yetib keldim",
+    "btn_picked": "📦 Paketni oldim",
+    "btn_drop": "↩️ Bajara olmayman",
+    "btn_done": "✅ Tayyor",
+    "dropped": "Buyurtma qaytarildi",
+    "dropped_note": "↩️ Buyurtmani boshqa ko‘ngillilarga qaytardingiz",
+    "drop_too_late": "Bu buyurtmani endi qaytarib bo‘lmaydi",
+    "done_ok": "Tayyor ✓",
+    "done_note": "✅ Buyurtma yopildi. Rahmat!",
+    "addr_short": "{house}-uy",
+    "addr_full": "{house}-uy, {flat}-xonadon",
+    "addr_entrance": "{entrance}-podez, {floor}-qavat",
+    "addr_locked": "🔒 Aniq manzil — buyurtmani olganingizdan keyin",
+    "st_open": "🟡 Ko‘ngilli qidiryapmiz",
+    "st_taken": "🟢 Ko‘ngilli yo‘lda",
+    "st_arrived": "🚪 Ko‘ngilli eshik oldida",
+    "st_picked": "📦 Konteynerga olib ketyapti",
+    "st_done": "✅ Tayyor",
+    "st_cancelled": "❌ Bekor qilingan",
+    "new_order": "🔔 Yaqinda yangi buyurtma",
+    "order_free": "🔁 Buyurtma yana bo‘sh",
+    "order_due": "🕓 Buyurtma vaqti yaqinlashdi",
+    "order_help": "🔔 Buyurtmani hech kim olmadi — yordam kerak",
+    "vol_gone": "🔎 Ko‘ngilli kela olmadi — boshqasini qidiryapmiz.",
+    "client_cancelled": "❌ Yashovchi buyurtmani bekor qildi — borish shart emas.",
+    "btn_open_order": "📱 Buyurtmani ochish",
+    "closed_cancel": "🌙 Uzr, soat {close_h}:00 gacha ko‘ngilli topilmadi.\n"
+                     "{hours} — buyurtmani ertalab qoldiring, ertalab ko‘ngillilar ko‘proq bo‘ladi.",
+    "orphan_cancel": "⌛️ Buyurtma yopildi — bir kun davomida uni hech kim ola olmadi.\n"
+                     "Yangisini qoldirib ko‘ring — kechqurun ko‘ngillilar ko‘proq bo‘ladi.",
+    "hours_text": "Xizmat {open_h}:00 dan {close_h}:00 gacha ishlaydi",
+    "msg_from": "💬 {who} {name}:",
+    "who_client": "Yashovchi",
+    "who_volunteer": "Ko‘ngilli",
+    "admin_says": "✉️ Qulay tashkilotchisi:",
+    "admin_says_reply": "✉️ Qulay tashkilotchisi:\n\n{text}\n\n"
+                        "— Shu yerda javob yozishingiz mumkin, shunchaki xabar yuboring.",
+    "admin_online": "✉️ Qulay tashkilotchisi aloqada — nima bo‘lganini yozing. "
+                    "Shunchaki shu yerga xabar yuboring.",
+    "admin_closed": "✅ Tashkilotchi suhbatni yakunladi. Rahmat!",
+    "passed_on": "Tashkilotchiga yetkazdim ✓",
+    "no_session": "Men tashkilotchiga xabarlarni faqat suhbat ochiq bo‘lganda yetkazaman.\n"
+                  "Buyurtma paytida biror narsa bo‘lsa — ilovada «Nimadir noto‘g‘ri» "
+                  "tugmasini bosing, tashkilotchi shu yerga yozadi.",
+    "blocked": "⛔️ Tashkilotchi Qulay’ga kirishingizni vaqtincha yopdi.",
+    "unblocked": "✅ Qulay’ga kirish qaytarildi.",
+    "admin_cancelled": "❌ Tashkilotchi buyurtmani bekor qildi.",
+    "code_ready": "✅ {name} uchun kod tayyor.\nUnga shu havolani yuboring:\n{link}",
+    "code_declined": "Tashkilotchi hozircha {name} uchun kod bermadi.",
+},
 }
+
+def user_lang(uid: str) -> str:
+    """Язык человека. Хранится в users/{uid}/lang — тот же профиль, что читает
+    Mini App, так что выбор языка у бота и в приложении общий."""
+    v = db.reference(f"users/{uid}/lang").get()
+    return v if v in LANGS else DEFAULT_LANG
+
+def t(lang: str, key: str, **kw) -> str:
+    """Фраза по ключу. Если в узбекском словаре ключа нет — берём русский,
+    чтобы человек увидел текст, а не пустоту или сам ключ."""
+    s = T.get(lang, T[DEFAULT_LANG]).get(key) or T[DEFAULT_LANG].get(key) or key
+    return s.format(**kw) if kw else s
+
+def both(key: str) -> str:
+    """Регулярка для кнопки меню на любом из языков: подписи локализованы,
+    а ловим их одним хендлером, иначе узбекское меню просто перестало бы
+    нажиматься."""
+    return "^(" + "|".join(re.escape(T[l][key]) for l in LANGS) + ")$"
+
+BAG_KEYS = ("bag_one", "bag_few", "bag_big", "bag_glass")
+
+def bag_options(lang: str):
+    return [t(lang, k) for k in BAG_KEYS]
+
+def bag_to_canon(text: str) -> str:
+    """Что бы человек ни нажал, в заявку кладём русский вариант: его же ждёт
+    Mini App и вторая сторона, у которой может быть другой язык."""
+    s = (text or "").strip()
+    for k in BAG_KEYS:
+        if s == T["uz"][k] or s == T["ru"][k]:
+            return T["ru"][k]
+    return s
+
+STATUS_KEY = {"open": "st_open", "taken": "st_taken", "arrived": "st_arrived",
+              "picked": "st_picked", "done": "st_done", "cancelled": "st_cancelled"}
+
+def status_label(status: str, lang: str = DEFAULT_LANG) -> str:
+    key = STATUS_KEY.get(status)
+    return t(lang, key) if key else (status or "")
+
+# консоль организатора остаётся русской — этот словарь читают только /admin и /orders
+STATUS_LABEL = {s: t(DEFAULT_LANG, k) for s, k in STATUS_KEY.items()}
 
 # ================= ГЛОБАЛЬНОЕ СОСТОЯНИЕ =================
 main_loop = None            # event loop бота — заполняется в on_startup
@@ -136,34 +411,42 @@ def redeem_invite_code(code: str, uid: str, name: str) -> bool:
     except InviteCodeInvalid:
         return False
 
-def role_menu(role: str):
+def role_menu(role: str, lang: str = DEFAULT_LANG):
     if role == "volunteer":
         return ReplyKeyboardMarkup([
-            [KeyboardButton("🟢 Вы на связи")],
-            [KeyboardButton("🗺 Заявки рядом"), KeyboardButton("📦 Мои заявки")],
+            [KeyboardButton(t(lang, "btn_onair"))],
+            [KeyboardButton(t(lang, "btn_orders_near")), KeyboardButton(t(lang, "btn_my_jobs"))],
         ], resize_keyboard=True)
     return ReplyKeyboardMarkup([
-        [KeyboardButton("📦 Оставить заявку")],
-        [KeyboardButton("📋 Мои заявки")],
+        [KeyboardButton(t(lang, "btn_new_order"))],
+        [KeyboardButton(t(lang, "btn_my_orders"))],
     ], resize_keyboard=True)
 
-def order_text(o: dict, full: bool = True) -> str:
+def bags_label(o: dict, lang: str) -> str:
+    """В заявке лежит русский вариант — на экране показываем на языке читателя."""
+    s = o.get("bags") or ""
+    for k in BAG_KEYS:
+        if s == T["ru"][k]:
+            return t(lang, k)
+    return s
+
+def order_text(o: dict, full: bool = True, lang: str = DEFAULT_LANG) -> str:
     """full=False — версия для рассылки по всем свободным волонтёрам: там
     квартира, подъезд и комментарий (в нём часто код домофона) ещё не должны
     светиться. Точный адрес появляется у того, кто заявку взял."""
     if not full:
-        lines = [f"Дом {o.get('house','—')}"]
+        lines = [t(lang, "addr_short", house=o.get("house", "—"))]
         if o.get("bags"):
-            lines.append(f"🧺 {o['bags']}")
-        lines.append("🔒 Точный адрес — после того, как возьмёте заявку")
+            lines.append(f"🧺 {bags_label(o, lang)}")
+        lines.append(t(lang, "addr_locked"))
         return "\n".join(lines)
-    lines = [f"Дом {o.get('house','—')}, кв. {o.get('flat','—')}"]
-    lines.append(f"Подъезд {o.get('entrance','—')}, этаж {o.get('floor','—')}")
+    lines = [t(lang, "addr_full", house=o.get("house", "—"), flat=o.get("flat", "—"))]
+    lines.append(t(lang, "addr_entrance", entrance=o.get("entrance", "—"), floor=o.get("floor", "—")))
     if o.get("note"):
         lines.append(f"💬 {o['note']}")
     if o.get("bags"):
-        lines.append(f"🧺 {o['bags']}")
-    lines.append(STATUS_LABEL.get(o.get("status"), o.get("status", "")))
+        lines.append(f"🧺 {bags_label(o, lang)}")
+    lines.append(status_label(o.get("status"), lang))
     return "\n".join(lines)
 
 def send_async(chat_id: int, text: str, **kwargs):
@@ -179,98 +462,118 @@ def send_async(chat_id: int, text: str, **kwargs):
     asyncio.run_coroutine_threadsafe(_send(), main_loop)
 
 # ================= /start =================
-def phone_kb():
+def phone_kb(lang: str = DEFAULT_LANG):
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 Поделиться номером", request_contact=True)]],
+        [[KeyboardButton(t(lang, "btn_share_phone"), request_contact=True)]],
         resize_keyboard=True, one_time_keyboard=True
     )
 
-def app_url(role: str) -> str:
+def app_url(role: str, lang: str = None) -> str:
     """Ссылка на Mini App. Имя бота передаём внутрь, чтобы приложение могло
-    собрать корректную ссылку-приглашение для соседей, а не угадывать его."""
+    собрать корректную ссылку-приглашение для соседей, а не угадывать его.
+    Язык тоже: приложение откроется на том же языке, что и бот."""
     parts = []
     if role == "volunteer":
         parts.append("role=volunteer")
     if BOT_USERNAME:
         parts.append("bot=" + BOT_USERNAME)
+    if lang in LANGS:
+        parts.append("lang=" + lang)
     return APP_URL + ("?" + "&".join(parts) if parts else "")
 
-def open_app_kb(role: str):
-    label = "🚶 Открыть приложение" if role == "volunteer" else "📦 Открыть приложение"
-    return InlineKeyboardMarkup([[InlineKeyboardButton(label, web_app=WebAppInfo(url=app_url(role)))]])
+def open_app_kb(role: str, lang: str = DEFAULT_LANG):
+    label = t(lang, "btn_open_app_vol" if role == "volunteer" else "btn_open_app")
+    return InlineKeyboardMarkup([[InlineKeyboardButton(
+        label, web_app=WebAppInfo(url=app_url(role, lang)))]])
+
+def lang_kb():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(T["ru"]["btn_lang_ru"], callback_data="setlang_ru"),
+        InlineKeyboardButton(T["uz"]["btn_lang_uz"], callback_data="setlang_uz"),
+    ]])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    user = get_user(uid)
     arg = context.args[0] if context.args else ""
+
+    # Язык спрашиваем только у того, кто его ещё не выбирал. Аргумент /start
+    # (в том числе vol_КОД) переживает этот шаг в базе — иначе выбор языка
+    # съедал бы приглашение волонтёра.
+    if db.reference(f"users/{uid}/lang").get() not in LANGS:
+        if arg:
+            db.reference(f"users/{uid}/pendingStartArg").set(arg)
+        await update.message.reply_text(T["ru"]["lang_ask"], reply_markup=lang_kb())
+        return
+
+    await run_start(update.message, uid, arg, user_lang(uid))
+
+async def set_lang_cb(update, context):
+    """Выбор языка кнопкой. Дальше — тот же путь, что и обычный /start,
+    вместе с отложенным аргументом (приглашением), если он был."""
+    query = update.callback_query
+    uid = str(query.from_user.id)
+    lang = query.data.replace("setlang_", "")
+    if lang not in LANGS:
+        lang = DEFAULT_LANG
+    db.reference(f"users/{uid}/lang").set(lang)
+    arg = db.reference(f"users/{uid}/pendingStartArg").get() or ""
+    if arg:
+        db.reference(f"users/{uid}/pendingStartArg").delete()
+    await query.answer()
+    await query.edit_message_text(t(lang, "lang_saved") + "\n" + t(lang, "lang_hint"))
+    await run_start(query.message, uid, arg, lang, from_user=query.from_user)
+
+async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сменить язык в любой момент."""
+    await update.message.reply_text(T["ru"]["lang_ask"], reply_markup=lang_kb())
+
+async def run_start(message, uid: str, arg: str, lang: str, from_user=None):
+    """Общая логика /start для обоих входов — обычной команды и кнопки языка.
+    Держим её в одном месте, чтобы разбор приглашения не разъехался."""
+    user = get_user(uid)
+    who = from_user or message.chat
 
     # /start vol_КОД должен разбираться ДО ветки "уже зарегистрирован" — иначе
     # для человека, у которого в users/{uid} уже есть phone (например, он же
     # раньше зашёл как житель через собственную регистрацию Mini App), код
     # приглашения молча игнорировался: бот отвечал "с возвращением" тем же
-    # клиентским меню и даже не смотрел на arg. Внешне это выглядело как
-    # прошедшая регистрация — код принят, диалог отработал — а роль в базе
-    # не менялась вообще.
+    # клиентским меню и даже не смотрел на arg.
     if arg.startswith("vol_") or arg == "vol":
         if user and user.get("role") == "volunteer":
-            await update.message.reply_text(
-                "Вы уже волонтёр — код не нужен.",
-                reply_markup=role_menu("volunteer")
-            )
-            await update.message.reply_text(
-                "Заявки и статус — прямо в приложении:",
-                reply_markup=open_app_kb("volunteer")
-            )
+            await message.reply_text(t(lang, "already_volunteer"),
+                                     reply_markup=role_menu("volunteer", lang))
+            await message.reply_text(t(lang, "app_cta"),
+                                     reply_markup=open_app_kb("volunteer", lang))
             return
         code = arg[4:].strip().upper() if arg.startswith("vol_") else ""
-        if not code or not redeem_invite_code(code, uid, full_name(update.effective_user)):
-            await update.message.reply_text(
-                "Код приглашения недействителен или уже использован.\n"
-                "Чтобы стать волонтёром, попросите новый код у организатора и наберите:\n"
-                "/start vol_КОД"
-            )
+        name_for_code = full_name(who) if from_user else (user or {}).get("name", "")
+        if not code or not redeem_invite_code(code, uid, name_for_code):
+            await message.reply_text(t(lang, "code_bad"))
             return
         if user and user.get("phone"):
             # человек уже отвечал на телефон/имя раньше (как житель) — второй
             # раз не переспрашиваем, нужен только район, которого у жителя нет
             db.reference(f"users/{uid}/pendingUpgradeRole").set("volunteer")
-            await update.message.reply_text(
-                "Код принят! Теперь вы волонтёр — история ваших заявок как жителя "
-                "никуда не денется, просто интерфейс переключится на волонтёрский.\n\n"
-                "В каком районе/махалле вы обычно будете волонтёрить?"
-            )
+            await message.reply_text(t(lang, "code_ok_upgrade"))
             return
         db.reference(f"users/{uid}/pendingRole").set("volunteer")
-        await update.message.reply_text(
-            "Привет! Это Qulay — вывоз мусора с помощью волонтёров.\n\n"
-            "Поделитесь номером, чтобы продолжить:",
-            reply_markup=phone_kb()
-        )
+        await message.reply_text(t(lang, "hello"), reply_markup=phone_kb(lang))
         return
 
     if user and user.get("phone"):
         role = user.get("role", "client")
-        await update.message.reply_text(
-            f"С возвращением, {user.get('name','')}!",
-            reply_markup=role_menu(role)
-        )
-        await update.message.reply_text(
-            "Заявки и статус — прямо в приложении:",
-            reply_markup=open_app_kb(role)
-        )
+        await message.reply_text(t(lang, "welcome_back", name=user.get("name", "")),
+                                 reply_markup=role_menu(role, lang))
+        await message.reply_text(t(lang, "app_cta"),
+                                 reply_markup=open_app_kb(role, lang))
         return
     # /start ref_UID  -> пришёл по ссылке жителя, запомним кто пригласил
-    pending_role = "client"
     if arg.startswith("ref_"):
         inviter = arg[4:].strip()
         if inviter and inviter != uid:
             db.reference(f"users/{uid}/pendingRef").set(inviter)
-    db.reference(f"users/{uid}/pendingRole").set(pending_role)
-    await update.message.reply_text(
-        "Привет! Это Qulay — вывоз мусора с помощью волонтёров.\n\n"
-        "Поделитесь номером, чтобы продолжить:",
-        reply_markup=phone_kb()
-    )
+    db.reference(f"users/{uid}/pendingRole").set("client")
+    await message.reply_text(t(lang, "hello"), reply_markup=phone_kb(lang))
 
 async def classic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Запасной выход: открыть прежнюю версию приложения (classic.html).
@@ -398,8 +701,8 @@ async def block_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{'✅ Доступ возвращён' if unblock else '⛔️ Доступ закрыт'}\n"
         f"{label}: {u.get('name','—')} · {u.get('phone','')}")
     try:
-        send_async(int(target), "✅ Доступ к Qulay возвращён." if unblock
-                   else "⛔️ Организатор временно закрыл вам доступ к Qulay.")
+        send_async(int(target), t(user_lang(target), "unblocked") if unblock
+                   else t(user_lang(target), "blocked"))
     except (ValueError, TypeError):
         pass
 
@@ -543,7 +846,7 @@ async def admin_cancel(update, context):
     for side in ("clientId", "volunteerId"):
         if o.get(side):
             try:
-                send_async(int(o[side]), "❌ Организатор отменил заявку.")
+                send_async(int(o[side]), t(user_lang(str(o[side])), "admin_cancelled"))
             except (ValueError, TypeError):
                 pass
 
@@ -649,9 +952,7 @@ async def say_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = " ".join(context.args[1:])
     try:
-        send_async(int(target),
-                   f"✉️ Организатор Qulay:\n\n{text}\n\n"
-                   "— Можете ответить прямо здесь, просто напишите сообщение.")
+        send_async(int(target), t(user_lang(target), "admin_says_reply", text=text))
         support_open(target, uid)
         admin_set_target(uid, target)
         await update.message.reply_text(
@@ -672,9 +973,7 @@ def _begin_chat(admin_uid: str, target: str, greet: bool = True) -> str:
     # переключении между разговорами человека дёргать незачем
     if greet and not was_open:
         try:
-            send_async(int(target),
-                       "✉️ Организатор Qulay на связи — напишите, что случилось. "
-                       "Просто отправьте сообщение сюда.")
+            send_async(int(target), t(user_lang(target), "admin_online"))
         except (ValueError, TypeError):
             pass
     return u.get("name", "—")
@@ -695,7 +994,7 @@ async def say_open_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             admin_clear_target(uid)
         u = get_user(target) or {}
         try:
-            send_async(int(target), "✅ Организатор завершил разговор. Спасибо!")
+            send_async(int(target), t(user_lang(target), "admin_closed"))
         except (ValueError, TypeError):
             pass
         await update.message.reply_text(f"Диалог закрыт: {u.get('name','—')}")
@@ -762,7 +1061,7 @@ async def close_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if admin_target(uid) == target:
         admin_clear_target(uid)
     try:
-        send_async(int(target), "✅ Организатор завершил разговор. Спасибо!")
+        send_async(int(target), t(user_lang(target), "admin_closed"))
     except (ValueError, TypeError):
         pass
     await update.message.reply_text(f"Диалог закрыт: {name}")
@@ -854,9 +1153,9 @@ async def approve_request(update, context):
                 "decidedAt": int(datetime.now().timestamp() * 1000)})
     link = f"https://t.me/{BOT_USERNAME}?start=vol_{code}" if BOT_USERNAME else f"код {code}"
     try:
+        rlang = user_lang(str(r.get("byUid")))
         send_async(int(r.get("byUid")),
-                   f"✅ Код для {r.get('forName','друга')} готов.\n"
-                   f"Перешлите ему эту ссылку:\n{link}")
+                   t(rlang, "code_ready", name=r.get("forName", "—"), link=link))
     except (ValueError, TypeError):
         pass
     await query.answer("Код выдан ✓")
@@ -877,7 +1176,8 @@ async def decline_request(update, context):
     ref.update({"status": "declined", "decidedAt": int(datetime.now().timestamp() * 1000)})
     try:
         send_async(int(r.get("byUid")),
-                   f"Организатор пока не выдал код для {r.get('forName','вашего друга')}.")
+                   t(user_lang(str(r.get("byUid"))), "code_declined",
+                     name=r.get("forName", "—")))
     except (ValueError, TypeError):
         pass
     await query.answer("Отклонено")
@@ -904,15 +1204,16 @@ async def invites_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contact = update.message.contact
     user = update.effective_user
-    if contact.user_id and contact.user_id != user.id:
-        await update.message.reply_text("Пожалуйста, поделитесь именно своим номером.")
-        return
     uid = str(user.id)
+    lang = user_lang(uid)
+    if contact.user_id and contact.user_id != user.id:
+        await update.message.reply_text(t(lang, "share_own_phone"))
+        return
     phone = fmt_phone(contact.phone_number)
     # регистрация завершится в name_received() — там же пишем phone в users/{uid}
     db.reference(f"users/{uid}/pendingPhone").set(phone)
     await update.message.reply_text(
-        "Как вас записать? Жильцы и волонтёры увидят именно это имя.",
+        t(lang, "ask_name"),
         reply_markup=ReplyKeyboardRemove()
     )
 
@@ -924,11 +1225,12 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # это раньше pendingPhone: у такого человека pendingPhone всегда пуст
     # (он уже зарегистрирован), и без этой проверки его ответ на вопрос
     # о районе принял бы за случайное сообщение боту.
+    lang = user_lang(uid)
     pending_upgrade = db.reference(f"users/{uid}/pendingUpgradeRole").get()
     if pending_upgrade == "volunteer":
         district = update.message.text.strip()
         if len(district) < 1:
-            await update.message.reply_text("Напишите хотя бы коротко.")
+            await update.message.reply_text(t(lang, "place_short"))
             return
         u = get_user(uid) or {}
         db.reference(f"users/{uid}").update({
@@ -940,12 +1242,12 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "name": u.get("name", ""), "role": "volunteer", "district": district,
         })
         await update.message.reply_text(
-            f"Готово! Теперь вы волонтёр в районе «{district}».",
-            reply_markup=role_menu("volunteer")
+            t(lang, "upgrade_done", district=district),
+            reply_markup=role_menu("volunteer", lang)
         )
         await update.message.reply_text(
-            "Открывайте заявки прямо здесь:",
-            reply_markup=open_app_kb("volunteer")
+            t(lang, "open_here"),
+            reply_markup=open_app_kb("volunteer", lang)
         )
         return
 
@@ -961,8 +1263,8 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if tgt:
                 u = get_user(tgt) or {}
                 try:
-                    send_async(int(tgt),
-                               f"✉️ Организатор Qulay:\n\n{update.message.text}")
+                    send_async(int(tgt), t(user_lang(tgt), "admin_says")
+                               + "\n\n" + update.message.text)
                     db.reference(f"support/{tgt}/lastAt").set(
                         int(datetime.now().timestamp() * 1000))
                     await update.message.reply_text(
@@ -991,15 +1293,12 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
                 if not focused:
                     db.reference(f"support/{uid}/unread").transaction(lambda c: (c or 0) + 1)
-            await update.message.reply_text("Передал организатору ✓")
+            await update.message.reply_text(t(lang, "passed_on"))
             return
         # человек пишет боту просто так: раньше сообщение уходило в пустоту и
         # он не понимал, услышали его или нет
         if db.reference(f"users/{uid}/phone").get():
-            await update.message.reply_text(
-                "Я передаю сообщения организатору только когда разговор открыт.\n"
-                "Если что-то случилось во время заявки — нажмите «Что-то не так» "
-                "в приложении, и организатор напишет вам сюда.")
+            await update.message.reply_text(t(lang, "no_session"))
         return  # не в процессе регистрации — пусть обработают другие хендлеры
     pending_role = db.reference(f"users/{uid}/pendingRole").get() or "client"
     pending_name = db.reference(f"users/{uid}/pendingName").get()
@@ -1008,18 +1307,17 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # это сообщение — имя
         name = update.message.text.strip()
         if len(name) < 2:
-            await update.message.reply_text("Имя слишком короткое, напишите ещё раз.")
+            await update.message.reply_text(t(lang, "name_short"))
             return
         db.reference(f"users/{uid}/pendingName").set(name)
-        prompt = ("В каком доме вы живёте? (номер или название)" if pending_role != "volunteer"
-                  else "В каком районе/махалле вы обычно волонтёрите?")
-        await update.message.reply_text(prompt)
+        await update.message.reply_text(
+            t(lang, "ask_district" if pending_role == "volunteer" else "ask_house"))
         return
 
     # это сообщение — дом (жилец) или район (волонтёр)
     place = update.message.text.strip()
     if len(place) < 1:
-        await update.message.reply_text("Напишите хотя бы коротко.")
+        await update.message.reply_text(t(lang, "place_short"))
         return
     name = pending_name
     place_field = {"district": place} if pending_role == "volunteer" else {"house": place}
@@ -1036,7 +1334,8 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "at": int(datetime.now().timestamp() * 1000),
         })
         try:
-            send_async(int(inviter), f"🏡 По вашей ссылке зарегистрировался {name} · {pending_phone}")
+            send_async(int(inviter), t(user_lang(str(inviter)), "someone_joined",
+                                       name=name, phone=pending_phone))
         except (ValueError, TypeError):
             pass
     db.reference(f"users/{uid}/pendingRole").delete()
@@ -1051,58 +1350,64 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "points": 0, "ordersCompleted": 0, "ratingSum": 0, "ratingCount": 0,
     })
 
-    label = "Волонтёр" if pending_role == "volunteer" else "Жилец"
-    await update.message.reply_text(f"Готово, {name}! Роль: {label}", reply_markup=role_menu(pending_role))
+    label = t(lang, "role_volunteer" if pending_role == "volunteer" else "role_client")
+    await update.message.reply_text(t(lang, "reg_done", name=name, role=label),
+                                    reply_markup=role_menu(pending_role, lang))
     await update.message.reply_text(
-        "Открывайте заявки прямо здесь:",
-        reply_markup=open_app_kb(pending_role)
+        t(lang, "open_here"),
+        reply_markup=open_app_kb(pending_role, lang)
     )
 
 # ================= ЖИЛЕЦ: НОВАЯ ЗАЯВКА =================
 async def new_order_start(update, context):
+    lang = user_lang(str(update.effective_user.id))
     if not is_open_now():
-        await update.message.reply_text(
-            f"🌙 Сейчас закрыто. {OPEN_HOURS_TEXT}.\n"
-            f"Оставьте заявку утром — с {OPEN_H}:00 волонтёры снова на связи.")
+        await update.message.reply_text(t(
+            lang, "closed_now", open_h=OPEN_H,
+            hours=t(lang, "hours_text", open_h=OPEN_H, close_h=CLOSE_H)))
         return ConversationHandler.END
     context.user_data["order"] = {}
-    await update.message.reply_text("Номер дома?", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(t(lang, "ask_house_num"), reply_markup=ReplyKeyboardRemove())
     return HOUSE
 
 async def get_house(update, context):
     context.user_data["order"]["house"] = update.message.text.strip()
-    await update.message.reply_text("Подъезд?")
+    await update.message.reply_text(t(user_lang(str(update.effective_user.id)), "ask_entrance"))
     return ENTRANCE
 
 async def get_entrance(update, context):
     context.user_data["order"]["entrance"] = update.message.text.strip()
-    await update.message.reply_text("Этаж?")
+    await update.message.reply_text(t(user_lang(str(update.effective_user.id)), "ask_floor"))
     return FLOOR
 
 async def get_floor(update, context):
     context.user_data["order"]["floor"] = update.message.text.strip()
-    await update.message.reply_text("Квартира?")
+    await update.message.reply_text(t(user_lang(str(update.effective_user.id)), "ask_flat"))
     return FLAT
 
 async def get_flat(update, context):
     context.user_data["order"]["flat"] = update.message.text.strip()
-    await update.message.reply_text("Комментарий (например, код домофона). Если нет — «-»")
+    await update.message.reply_text(t(user_lang(str(update.effective_user.id)), "ask_note"))
     return NOTE
 
 async def get_note(update, context):
+    lang = user_lang(str(update.effective_user.id))
     text = update.message.text.strip()
     context.user_data["order"]["note"] = "" if text == "-" else text
-    kb = ReplyKeyboardMarkup([[KeyboardButton(b)] for b in BAG_OPTIONS],
+    kb = ReplyKeyboardMarkup([[KeyboardButton(b)] for b in bag_options(lang)],
                               resize_keyboard=True, one_time_keyboard=True)
-    await update.message.reply_text("Что выносим?", reply_markup=kb)
+    await update.message.reply_text(t(lang, "ask_bags"), reply_markup=kb)
     return BAGS
 
 async def get_bags(update, context):
     order = context.user_data["order"]
-    order["bags"] = update.message.text.strip()
+    # в базу кладём русский вариант: заявку читают обе стороны и Mini App,
+    # а язык у них может быть разный
+    order["bags"] = bag_to_canon(update.message.text)
 
     user = update.effective_user
     uid = str(user.id)
+    lang = user_lang(uid)
     profile = get_user(uid) or {}
     order.update({
         "clientId": uid,
@@ -1113,35 +1418,39 @@ async def get_bags(update, context):
         "createdAt": int(datetime.now().timestamp() * 1000),
     })
     db.reference("orders").push(order)
-    await update.message.reply_text("Заявка отправлена волонтёрам ✅", reply_markup=role_menu("client"))
+    await update.message.reply_text(t(lang, "order_sent"),
+                                    reply_markup=role_menu("client", lang))
     context.user_data.pop("order", None)
     return ConversationHandler.END
 
 async def cancel_conv(update, context):
     context.user_data.pop("order", None)
-    role = (get_user(str(update.effective_user.id)) or {}).get("role", "client")
-    await update.message.reply_text("Отменено.", reply_markup=role_menu(role))
+    uid = str(update.effective_user.id)
+    lang = user_lang(uid)
+    role = (get_user(uid) or {}).get("role", "client")
+    await update.message.reply_text(t(lang, "cancelled"), reply_markup=role_menu(role, lang))
     return ConversationHandler.END
 
 async def my_orders_client(update, context):
     uid = str(update.effective_user.id)
+    lang = user_lang(uid)
     orders = db.reference("orders").order_by_child("clientId").equal_to(uid).get() or {}
     if not orders:
-        await update.message.reply_text("Пока нет заявок.")
+        await update.message.reply_text(t(lang, "no_orders"))
         return
     entries = sorted(orders.items(), key=lambda kv: kv[1].get("createdAt", 0), reverse=True)
     for _id, o in entries[:10]:
-        await update.message.reply_text(order_text(o))
+        await update.message.reply_text(order_text(o, lang=lang))
 
 # ================= ВОЛОНТЁР: НА СВЯЗИ =================
 async def toggle_onair(update, context):
     uid = str(update.effective_user.id)
+    lang = user_lang(uid)
     cur = (get_user(uid) or {}).get("onair", False)
     db.reference(f"users/{uid}/onair").set(not cur)
     await update.message.reply_text(
-        "Вы на связи 🟢 — пришлём уведомление о новой заявке" if not cur
-        else "Уведомления выключены 🔕",
-        reply_markup=role_menu("volunteer")
+        t(lang, "onair_on" if not cur else "onair_off"),
+        reply_markup=role_menu("volunteer", lang)
     )
 
 def open_orders():
@@ -1149,13 +1458,15 @@ def open_orders():
     return sorted(orders.items(), key=lambda kv: kv[1].get("createdAt", 0), reverse=True)
 
 async def orders_nearby(update, context):
+    lang = user_lang(str(update.effective_user.id))
     entries = open_orders()
     if not entries:
-        await update.message.reply_text("Открытых заявок сейчас нет.")
+        await update.message.reply_text(t(lang, "no_open_orders"))
         return
     for oid, o in entries[:10]:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
-        await update.message.reply_text(order_text(o, full=False), reply_markup=kb)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            t(lang, "btn_take"), callback_data=f"take_{oid}")]])
+        await update.message.reply_text(order_text(o, full=False, lang=lang), reply_markup=kb)
 
 # ================= ВОЛОНТЁР: ВЗЯТЬ ЗАЯВКУ (транзакция — защита от гонки) =================
 async def take_order(update, context):
@@ -1179,28 +1490,31 @@ async def take_order(update, context):
         cur["takenAt"] = int(datetime.now().timestamp() * 1000)
         return cur
 
+    lang = user_lang(uid)
     result = ref.transaction(txn)
     if result and result.get("volunteerId") == uid:
-        await query.answer("Заявка ваша ✓")
+        await query.answer(t(lang, "took_it"))
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚪 Я на месте", callback_data=f"arrived_{oid}")],
-            [InlineKeyboardButton("↩️ Не смогу выполнить", callback_data=f"drop_{oid}")],
+            [InlineKeyboardButton(t(lang, "btn_arrived"), callback_data=f"arrived_{oid}")],
+            [InlineKeyboardButton(t(lang, "btn_drop"), callback_data=f"drop_{oid}")],
         ])
-        await query.edit_message_text(order_text(result), reply_markup=kb)
+        await query.edit_message_text(order_text(result, lang=lang), reply_markup=kb)
     else:
-        await query.answer("Заявку уже взял другой волонтёр", show_alert=True)
-        await query.edit_message_text(query.message.text + "\n\n❌ Уже занято")
+        await query.answer(t(lang, "too_late"), show_alert=True)
+        await query.edit_message_text(query.message.text + "\n\n" + t(lang, "taken_note"))
 
 async def step_arrived(update, context):
     query = update.callback_query
     oid = query.data.replace("arrived_", "")
+    lang = user_lang(str(query.from_user.id))
     db.reference(f"orders/{oid}").update({"status": "arrived", "arrivedAt": int(datetime.now().timestamp()*1000)})
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📦 Пакет забрал", callback_data=f"picked_{oid}")],
-        [InlineKeyboardButton("↩️ Не смогу выполнить", callback_data=f"drop_{oid}")],
+        [InlineKeyboardButton(t(lang, "btn_picked"), callback_data=f"picked_{oid}")],
+        [InlineKeyboardButton(t(lang, "btn_drop"), callback_data=f"drop_{oid}")],
     ])
     await query.answer()
-    await query.edit_message_text(order_text(db.reference(f"orders/{oid}").get()), reply_markup=kb)
+    await query.edit_message_text(
+        order_text(db.reference(f"orders/{oid}").get(), lang=lang), reply_markup=kb)
 
 async def drop_order(update, context):
     """Волонтёр вернул заявку в общий список — без штрафа, иначе он просто пропадёт молча."""
@@ -1217,39 +1531,45 @@ async def drop_order(update, context):
             cur.pop(k, None)
         return cur
 
+    lang = user_lang(uid)
     result = ref.transaction(txn)
     if result and result.get("status") == "open":
-        await query.answer("Заявка возвращена")
-        await query.edit_message_text(query.message.text + "\n\n↩️ Вы вернули заявку другим волонтёрам")
+        await query.answer(t(lang, "dropped"))
+        await query.edit_message_text(query.message.text + "\n\n" + t(lang, "dropped_note"))
     else:
-        await query.answer("Эту заявку уже нельзя вернуть", show_alert=True)
+        await query.answer(t(lang, "drop_too_late"), show_alert=True)
 
 async def step_picked(update, context):
     query = update.callback_query
     oid = query.data.replace("picked_", "")
+    lang = user_lang(str(query.from_user.id))
     db.reference(f"orders/{oid}").update({"status": "picked", "pickedAt": int(datetime.now().timestamp()*1000)})
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Готово", callback_data=f"done_{oid}")]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+        t(lang, "btn_done"), callback_data=f"done_{oid}")]])
     await query.answer()
-    await query.edit_message_text(order_text(db.reference(f"orders/{oid}").get()), reply_markup=kb)
+    await query.edit_message_text(
+        order_text(db.reference(f"orders/{oid}").get(), lang=lang), reply_markup=kb)
 
 async def step_done(update, context):
     query = update.callback_query
     oid = query.data.replace("done_", "")
     uid = str(query.from_user.id)
+    lang = user_lang(uid)
     db.reference(f"orders/{oid}").update({"status": "done", "doneAt": int(datetime.now().timestamp()*1000)})
     db.reference(f"users/{uid}/completedCount").transaction(lambda c: (c or 0) + 1)
-    await query.answer("Готово ✓")
-    await query.edit_message_text(query.message.text + "\n\n✅ Заявка закрыта. Спасибо!")
+    await query.answer(t(lang, "done_ok"))
+    await query.edit_message_text(query.message.text + "\n\n" + t(lang, "done_note"))
 
 async def my_orders_volunteer(update, context):
     uid = str(update.effective_user.id)
+    lang = user_lang(uid)
     orders = db.reference("orders").order_by_child("volunteerId").equal_to(uid).get() or {}
     if not orders:
-        await update.message.reply_text("Пока нет принятых заявок.")
+        await update.message.reply_text(t(lang, "no_jobs"))
         return
     entries = sorted(orders.items(), key=lambda kv: kv[1].get("createdAt", 0), reverse=True)
     for _id, o in entries[:10]:
-        await update.message.reply_text(order_text(o))
+        await update.message.reply_text(order_text(o, lang=lang))
 
 # ================= ЖИВАЯ СИНХРОНИЗАЦИЯ С Firebase (в обе стороны) =================
 def _bump_leaderboard(uid: str, points: int, orders_delta: int):
@@ -1309,27 +1629,30 @@ def on_orders_change(event):
         # отказался и вернул её в общий список — во втором случае before_status
         # не None, и раньше эта ветка молча пропускалась, а заявка повисала
         returned = before_status is not None
-        title = "🔁 Заявка снова свободна" if returned else "🔔 Новая заявка рядом"
+        title_key = "order_free" if returned else "new_order"
         # заявку «к 18:00» не будим сейчас — её разошлёт сторож, когда подойдёт
         # время, иначе волонтёр возьмёт её в полдень и житель полдня ждёт
         if order_is_due(after):
-            broadcast_open_order(oid, after, title)
+            broadcast_open_order(oid, after, title_key)
             db.reference(f"orders/{oid}/notifiedAt").set(int(datetime.now().timestamp() * 1000))
         if returned:
             try:
+                clang = user_lang(str(after.get("clientId")))
                 send_async(int(after.get("clientId")),
-                           "🔎 Волонтёр не смог прийти — ищем другого.\n" + order_text(after))
+                           t(clang, "vol_gone") + "\n" + order_text(after, lang=clang))
             except (ValueError, TypeError):
                 pass
 
     elif new_status in ("taken", "arrived", "picked", "done", "cancelled"):
         client_id = after.get("clientId")
         try:
-            msg = STATUS_LABEL.get(new_status, new_status) + "\n" + order_text(after)
+            clang = user_lang(str(client_id))
+            msg = status_label(new_status, clang) + "\n" + order_text(after, lang=clang)
             if new_status in ("taken", "arrived", "picked"):
-                deep_url = app_url("client") + ("&" if "?" in app_url("client") else "?") + "view=live"
+                base = app_url("client", clang)
+                deep_url = base + ("&" if "?" in base else "?") + "view=live"
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-                    "📱 Открыть заявку", web_app=WebAppInfo(url=deep_url))]])
+                    t(clang, "btn_open_order"), web_app=WebAppInfo(url=deep_url))]])
                 send_async(int(client_id), msg, reply_markup=kb)
             else:
                 send_async(int(client_id), msg)
@@ -1340,8 +1663,9 @@ def on_orders_change(event):
             # житель отменил, когда волонтёр уже шёл — иначе тот узнает
             # только по тому, что экран в приложении молча сменился
             try:
+                vlang = user_lang(str(after["volunteerId"]))
                 send_async(int(after["volunteerId"]),
-                           "❌ Житель отменил заявку — идти не нужно.\n" + order_text(after))
+                           t(vlang, "client_cancelled") + "\n" + order_text(after, lang=vlang))
             except (ValueError, TypeError):
                 pass
 
@@ -1386,8 +1710,9 @@ def on_order_msg(event):
     m = event.data
     if "toUid" not in m:          # пришёл весь узел целиком при подписке
         return
-    who = "Житель" if m.get("fromRole") == "client" else "Волонтёр"
-    text = f"💬 {who} {m.get('fromName','')}:\n\n{m.get('text','')}"
+    rlang = user_lang(str(m["toUid"]))
+    who = t(rlang, "who_client" if m.get("fromRole") == "client" else "who_volunteer")
+    text = t(rlang, "msg_from", who=who, name=m.get("fromName", "")) + f"\n\n{m.get('text','')}"
     try:
         send_async(int(m["toUid"]), text)
     except (ValueError, TypeError):
@@ -1438,10 +1763,11 @@ def order_is_due(o: dict) -> bool:
         return True
     return int(datetime.now().timestamp() * 1000) >= t - LEAD_MIN * 60 * 1000
 
-def broadcast_open_order(oid: str, o: dict, title: str, everyone: bool = False):
+def broadcast_open_order(oid: str, o: dict, title_key: str, everyone: bool = False):
     """Разослать свободную заявку волонтёрам «на связи».
     everyone=True — всем волонтёрам подряд: это вторая ступень, когда заявку
-    четверть часа никто не взял и молчание уже дороже лишнего уведомления."""
+    четверть часа никто не взял и молчание уже дороже лишнего уведомления.
+    Каждому пишем на его языке — рассылка идёт по разным людям."""
     users = db.reference("users").get() or {}
     sent = 0
     for vid, u in users.items():
@@ -1451,9 +1777,13 @@ def broadcast_open_order(oid: str, o: dict, title: str, everyone: bool = False):
             continue
         if not everyone and not u.get("onair"):
             continue
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Взять заявку", callback_data=f"take_{oid}")]])
+        vlang = u.get("lang") if u.get("lang") in LANGS else DEFAULT_LANG
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+            t(vlang, "btn_take"), callback_data=f"take_{oid}")]])
         try:
-            send_async(int(vid), title + "\n\n" + order_text(o, full=False), reply_markup=kb)
+            send_async(int(vid),
+                       t(vlang, title_key) + "\n\n" + order_text(o, full=False, lang=vlang),
+                       reply_markup=kb)
             sent += 1
         except (ValueError, TypeError):
             pass  # заявка создана из Mini App, uid не telegram id
@@ -1470,8 +1800,7 @@ def escalate_open_order(oid: str, o: dict, now: int):
     since = o.get("notifiedAt") or o.get("createdAt") or now
     waited = (now - since) / 60000
     if waited >= ESCALATE_MIN and not o.get("escalatedAt"):
-        n = broadcast_open_order(
-            oid, o, "🔔 Заявку никто не взял — нужна помощь", everyone=True)
+        n = broadcast_open_order(oid, o, "order_help", everyone=True)
         db.reference(f"orders/{oid}/escalatedAt").set(now)
         log.info(f"заявка {oid}: разослана всем волонтёрам ({n})")
         return
@@ -1515,10 +1844,10 @@ def sweep_stale_orders():
                     "status": "cancelled", "cancelledBy": "schedule"})
                 log.info(f"заявка {oid} закрыта: сервис не работает")
                 try:
-                    send_async(int(o.get("clientId")),
-                               f"🌙 Извините, волонтёр не нашёлся до {CLOSE_H}:00.\n"
-                               f"{OPEN_HOURS_TEXT} — оставьте заявку утром, "
-                               "с утра волонтёров обычно больше.")
+                    clang = user_lang(str(o.get("clientId")))
+                    send_async(int(o.get("clientId")), t(
+                        clang, "closed_cancel", close_h=CLOSE_H,
+                        hours=t(clang, "hours_text", open_h=OPEN_H, close_h=CLOSE_H)))
                 except (ValueError, TypeError):
                     pass
                 continue
@@ -1527,14 +1856,13 @@ def sweep_stale_orders():
                 log.info(f"заявка {oid} закрыта: сутки без волонтёра")
                 try:
                     send_async(int(o.get("clientId")),
-                               "⌛️ Заявку закрыли — за сутки никто не смог её взять.\n"
-                               "Попробуйте оставить новую — волонтёров бывает больше по вечерам.")
+                               t(user_lang(str(o.get("clientId"))), "orphan_cancel"))
                 except (ValueError, TypeError):
                     pass
                 continue
             # запланированная заявка, время которой подошло, — рассылаем один раз
             if not o.get("notifiedAt") and order_is_due(o):
-                broadcast_open_order(oid, o, "🕓 Скоро время заявки")
+                broadcast_open_order(oid, o, "order_due")
                 db.reference(f"orders/{oid}/notifiedAt").set(now)
                 log.info(f"заявка {oid} разослана: подошло назначенное время")
                 continue
@@ -1595,6 +1923,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("myid", myid_cmd))
+    app.add_handler(CommandHandler("lang", lang_cmd))
     app.add_handler(CommandHandler("classic", classic_cmd))
     app.add_handler(CommandHandler("invite", invite_cmd))
     app.add_handler(CommandHandler("invites", invites_cmd))
@@ -1616,7 +1945,7 @@ def main():
     app.add_handler(MessageHandler(filters.CONTACT, contact_received))
 
     conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📦 Оставить заявку$"), new_order_start)],
+        entry_points=[MessageHandler(filters.Regex(both("btn_new_order")), new_order_start)],
         states={
             HOUSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_house)],
             ENTRANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_entrance)],
@@ -1629,10 +1958,12 @@ def main():
     )
     app.add_handler(conv)
 
-    app.add_handler(MessageHandler(filters.Regex("^📋 Мои заявки$"), my_orders_client))
-    app.add_handler(MessageHandler(filters.Regex("^🟢 Вы на связи$"), toggle_onair))
-    app.add_handler(MessageHandler(filters.Regex("^🗺 Заявки рядом$"), orders_nearby))
-    app.add_handler(MessageHandler(filters.Regex("^📦 Мои заявки$"), my_orders_volunteer))
+    # подписи кнопок локализованы, поэтому ловим оба языка одной регуляркой —
+    # иначе узбекское меню просто перестало бы нажиматься
+    app.add_handler(MessageHandler(filters.Regex(both("btn_my_orders")), my_orders_client))
+    app.add_handler(MessageHandler(filters.Regex(both("btn_onair")), toggle_onair))
+    app.add_handler(MessageHandler(filters.Regex(both("btn_orders_near")), orders_nearby))
+    app.add_handler(MessageHandler(filters.Regex(both("btn_my_jobs")), my_orders_volunteer))
 
     app.add_handler(CallbackQueryHandler(take_order, pattern="^take_"))
     app.add_handler(CallbackQueryHandler(step_arrived, pattern="^arrived_"))
@@ -1643,6 +1974,7 @@ def main():
     app.add_handler(CallbackQueryHandler(decline_request, pattern="^noreq_"))
     app.add_handler(CallbackQueryHandler(admin_cancel, pattern="^adminx_"))
     app.add_handler(CallbackQueryHandler(support_open_cb, pattern="^supop_"))
+    app.add_handler(CallbackQueryHandler(set_lang_cb, pattern="^setlang_"))
 
     # ловит "имя" после шаринга номера; регистрируется последним, чтобы не перехватывать
     # нажатия обычных кнопок меню — сам себя выключает, если пользователь не в процессе регистрации
