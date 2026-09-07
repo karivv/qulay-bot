@@ -199,6 +199,21 @@ T = {
     "code_ready": "✅ Код для {name} готов.\nПерешлите ему эту ссылку:\n{link}",
     "code_declined": "Организатор пока не выдал код для {name}.",
     "your_id": "Ваш Telegram ID: `{id}`",
+    "order_finished": "Эта заявка уже завершена.",
+    "order_gone": "Такой заявки больше нет.",
+    "order_not_yours": "Эта заявка сейчас не за вами.",
+    "order_moved": "Статус заявки изменился — обновите список.",
+    # готовые фразы из приложения: приходят ключом, показываем на языке читателя
+    "ph_intercom": "Код домофона — напишу в чате",
+    "ph_lift": "Лифт не работает",
+    "ph_at_door": "Пакет уже у двери",
+    "ph_two_min": "Выйду через пару минут",
+    "ph_intercom_broken": "Домофон не работает, позвоните",
+    "ph_coming": "Подхожу, буду через пару минут",
+    "ph_at_entrance": "Я у подъезда",
+    "ph_cant_open": "Не могу открыть дверь",
+    "ph_delayed": "Задержусь минут на десять",
+    "ph_took_it": "Пакет забрал, несу к контейнеру",
 },
 "uz": {
     "lang_saved": "Tayyor! Til — o‘zbekcha.",
@@ -311,6 +326,20 @@ T = {
     "code_ready": "✅ {name} uchun kod tayyor.\nUnga shu havolani yuboring:\n{link}",
     "code_declined": "Tashkilotchi hozircha {name} uchun kod bermadi.",
     "your_id": "Telegram ID raqamingiz: `{id}`",
+    "order_finished": "Bu buyurtma allaqachon yakunlangan.",
+    "order_gone": "Bunday buyurtma endi yo‘q.",
+    "order_not_yours": "Bu buyurtma hozir sizda emas.",
+    "order_moved": "Buyurtma holati o‘zgardi — ro‘yxatni yangilang.",
+    "ph_intercom": "Domofon kodi — chatda yozaman",
+    "ph_lift": "Lift ishlamayapti",
+    "ph_at_door": "Paket eshik oldida",
+    "ph_two_min": "Bir-ikki daqiqada chiqaman",
+    "ph_intercom_broken": "Domofon ishlamayapti, qo‘ng‘iroq qiling",
+    "ph_coming": "Yaqinlashyapman, bir-ikki daqiqada bo‘laman",
+    "ph_at_entrance": "Podez oldidaman",
+    "ph_cant_open": "Eshikni ocha olmayapman",
+    "ph_delayed": "O‘n daqiqacha kechikaman",
+    "ph_took_it": "Paketni oldim, konteynerga olib ketyapman",
 },
 }
 
@@ -843,10 +872,18 @@ async def admin_cancel(update, context):
         return
     oid = query.data.replace("adminx_", "")
     o = db.reference(f"orders/{oid}").get() or {}
-    db.reference(f"orders/{oid}").update({
-        "status": "cancelled", "cancelledBy": "admin"})
+    # заявку могли закрыть, пока список висел на экране
+    if not guarded_update(oid, ("open", "taken", "arrived", "picked"), {
+            "status": "cancelled", "cancelledBy": "admin"}):
+        await query.answer("Заявка уже завершена или отменена", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
     await query.answer("Отменена")
-    await query.edit_message_text(query.message.text + "\n\n❌ Отменена организатором")
+    await query.edit_message_text(query.message.text + "\n\n❌ Отменена организатором",
+                                  reply_markup=None)
     for side in ("clientId", "volunteerId"):
         if o.get(side):
             try:
@@ -1473,6 +1510,144 @@ async def orders_nearby(update, context):
         await update.message.reply_text(order_text(o, full=False, lang=lang), reply_markup=kb)
 
 # ================= ВОЛОНТЁР: ВЗЯТЬ ЗАЯВКУ (транзакция — защита от гонки) =================
+# ================= ПЕРЕХОДЫ СТАТУСА ЗАЯВКИ =================
+# Единственный источник правды по заявке — Firebase, а не то, какая кнопка
+# висит в чате. Кнопка в Telegram живёт вечно: заявку закрыли в приложении, а
+# волонтёр через час жмёт «Я на месте» из старого сообщения — раньше бот
+# слепо писал status=arrived поверх done и воскрешал закрытую заявку.
+ORDER_TERMINAL = ("done", "cancelled")
+# из каких статусов действие вообще допустимо
+ORDER_ALLOWED = {
+    "take":    ("open",),
+    "arrived": ("taken",),
+    "picked":  ("arrived",),
+    "done":    ("picked",),
+    "drop":    ("taken", "arrived", "picked"),
+}
+ORDER_NEXT = {"take": "taken", "arrived": "arrived", "picked": "picked",
+              "done": "done", "drop": "open"}
+ORDER_STAMP = {"take": "takenAt", "arrived": "arrivedAt",
+               "picked": "pickedAt", "done": "doneAt"}
+
+class OrderRejected(Exception):
+    def __init__(self, reason):
+        self.reason = reason        # gone | terminal | not_yours | wrong_state
+
+def transition_order(oid: str, uid: str, action: str, extra: dict = None):
+    """Атомарно перевести заявку в следующий статус. Возвращает (ok, order, reason).
+    Проверка и запись — в одной транзакции, поэтому два одновременных нажатия
+    не могут развести заявку по разным веткам."""
+    ref = db.reference(f"orders/{oid}")
+    box = {}
+
+    def txn(cur):
+        if not isinstance(cur, dict):
+            raise OrderRejected("gone")
+        st = cur.get("status")
+        if st in ORDER_TERMINAL:
+            raise OrderRejected("terminal")
+        # «взять» может любой свободный волонтёр, остальное — только тот,
+        # за кем заявка уже закреплена
+        if action != "take" and str(cur.get("volunteerId") or "") != str(uid):
+            raise OrderRejected("not_yours")
+        if st not in ORDER_ALLOWED.get(action, ()):
+            raise OrderRejected("wrong_state")
+        cur["status"] = ORDER_NEXT[action]
+        stamp = ORDER_STAMP.get(action)
+        if stamp:
+            cur[stamp] = int(datetime.now().timestamp() * 1000)
+        if action == "drop":
+            for k in ("volunteerId", "volunteerName", "volunteerPhone",
+                      "takenAt", "arrivedAt", "pickedAt"):
+                cur.pop(k, None)
+        if extra:
+            cur.update(extra)
+        box["order"] = dict(cur)
+        return cur
+
+    try:
+        ref.transaction(txn)
+        return True, box.get("order"), "ok"
+    except OrderRejected as e:
+        return False, (ref.get() if e.reason != "gone" else None), e.reason
+
+def guarded_update(oid: str, expect_status, changes: dict) -> bool:
+    """Записать, только если статус всё ещё тот, который мы видели. Сторож
+    работает по снимку, снятому в начале обхода: за это время волонтёр мог
+    взять или закрыть заявку, и слепая запись затёрла бы его действие."""
+    ref = db.reference(f"orders/{oid}")
+    ok = {"v": False}
+    expect = expect_status if isinstance(expect_status, (list, tuple)) else (expect_status,)
+
+    def txn(cur):
+        if not isinstance(cur, dict) or cur.get("status") not in expect:
+            return                      # отменяем транзакцию, ничего не пишем
+        cur.update(changes)
+        ok["v"] = True
+        return cur
+
+    try:
+        ref.transaction(txn)
+    except Exception as e:
+        log.warning(f"guarded_update {oid}: {e}")
+        return False
+    return ok["v"]
+
+async def reject_stale(query, lang: str, reason: str, order: dict):
+    """Кнопка из старого сообщения. Убираем клавиатуру, чтобы по ней больше
+    не жали, и объясняем, почему ничего не произошло."""
+    key = {"gone": "order_gone", "terminal": "order_finished",
+           "not_yours": "order_not_yours"}.get(reason, "order_moved")
+    await query.answer(t(lang, key), show_alert=True)
+    try:
+        note = t(lang, key)
+        if order:
+            note = status_label(order.get("status"), lang) + "\n" + note
+        await query.edit_message_text(query.message.text + "\n\n" + note,
+                                      reply_markup=None)
+    except Exception:
+        # текст мог не измениться (повторное нажатие) — молча снимаем кнопки
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+def step_kb(status: str, oid: str, lang: str):
+    """Клавиатура, соответствующая ТЕКУЩЕМУ статусу, а не тому, что было."""
+    if status == "taken":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(t(lang, "btn_arrived"), callback_data=f"arrived_{oid}")],
+            [InlineKeyboardButton(t(lang, "btn_drop"), callback_data=f"drop_{oid}")]])
+    if status == "arrived":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(t(lang, "btn_picked"), callback_data=f"picked_{oid}")],
+            [InlineKeyboardButton(t(lang, "btn_drop"), callback_data=f"drop_{oid}")]])
+    if status == "picked":
+        return InlineKeyboardMarkup([[InlineKeyboardButton(
+            t(lang, "btn_done"), callback_data=f"done_{oid}")]])
+    return None
+
+async def run_step(update, action: str, prefix: str):
+    """Общий обработчик шагов волонтёра: перечитать заявку, проверить переход,
+    и только потом что-то менять."""
+    query = update.callback_query
+    oid = query.data.replace(prefix, "")
+    uid = str(query.from_user.id)
+    lang = user_lang(uid)
+    ok, order, reason = transition_order(oid, uid, action)
+    if not ok:
+        await reject_stale(query, lang, reason, order)
+        return
+    if action == "done":
+        db.reference(f"users/{uid}/completedCount").transaction(lambda c: (c or 0) + 1)
+        await query.answer(t(lang, "done_ok"))
+        await query.edit_message_text(
+            order_text(order, lang=lang) + "\n\n" + t(lang, "done_note"), reply_markup=None)
+        return
+    await query.answer()
+    await query.edit_message_text(order_text(order, lang=lang),
+                                  reply_markup=step_kb(order.get("status"), oid, lang))
+
 async def take_order(update, context):
     query = update.callback_query
     oid = query.data.replace("take_", "")
@@ -1482,87 +1657,47 @@ async def take_order(update, context):
     vol_name = profile.get("name") or full_name(user)
     vol_phone = profile.get("phone", "")
 
-    ref = db.reference(f"orders/{oid}")
-
-    def txn(cur):
-        if not cur or cur.get("status") != "open":
-            return cur
-        cur["status"] = "taken"
-        cur["volunteerId"] = uid
-        cur["volunteerName"] = vol_name
-        cur["volunteerPhone"] = vol_phone
-        cur["takenAt"] = int(datetime.now().timestamp() * 1000)
-        return cur
-
     lang = user_lang(uid)
-    result = ref.transaction(txn)
-    if result and result.get("volunteerId") == uid:
-        await query.answer(t(lang, "took_it"))
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(lang, "btn_arrived"), callback_data=f"arrived_{oid}")],
-            [InlineKeyboardButton(t(lang, "btn_drop"), callback_data=f"drop_{oid}")],
-        ])
-        await query.edit_message_text(order_text(result, lang=lang), reply_markup=kb)
-    else:
-        await query.answer(t(lang, "too_late"), show_alert=True)
-        await query.edit_message_text(query.message.text + "\n\n" + t(lang, "taken_note"))
+    ok, order, reason = transition_order(oid, uid, "take", extra={
+        "volunteerId": uid, "volunteerName": vol_name, "volunteerPhone": vol_phone})
+    if not ok:
+        # заявку уже кто-то взял, закрыл или отменил, пока висела кнопка
+        if reason == "wrong_state":
+            await query.answer(t(lang, "too_late"), show_alert=True)
+            try:
+                await query.edit_message_text(query.message.text + "\n\n" + t(lang, "taken_note"),
+                                              reply_markup=None)
+            except Exception:
+                pass
+        else:
+            await reject_stale(query, lang, reason, order)
+        return
+    await query.answer(t(lang, "took_it"))
+    await query.edit_message_text(order_text(order, lang=lang),
+                                  reply_markup=step_kb("taken", oid, lang))
 
 async def step_arrived(update, context):
-    query = update.callback_query
-    oid = query.data.replace("arrived_", "")
-    lang = user_lang(str(query.from_user.id))
-    db.reference(f"orders/{oid}").update({"status": "arrived", "arrivedAt": int(datetime.now().timestamp()*1000)})
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(t(lang, "btn_picked"), callback_data=f"picked_{oid}")],
-        [InlineKeyboardButton(t(lang, "btn_drop"), callback_data=f"drop_{oid}")],
-    ])
-    await query.answer()
-    await query.edit_message_text(
-        order_text(db.reference(f"orders/{oid}").get(), lang=lang), reply_markup=kb)
+    await run_step(update, "arrived", "arrived_")
+
+async def step_picked(update, context):
+    await run_step(update, "picked", "picked_")
+
+async def step_done(update, context):
+    await run_step(update, "done", "done_")
 
 async def drop_order(update, context):
     """Волонтёр вернул заявку в общий список — без штрафа, иначе он просто пропадёт молча."""
     query = update.callback_query
     oid = query.data.replace("drop_", "")
     uid = str(query.from_user.id)
-    ref = db.reference(f"orders/{oid}")
-
-    def txn(cur):
-        if not cur or cur.get("volunteerId") != uid or cur.get("status") in ("done", "cancelled"):
-            return cur
-        cur["status"] = "open"
-        for k in ("volunteerId", "volunteerName", "volunteerPhone", "takenAt", "arrivedAt", "pickedAt"):
-            cur.pop(k, None)
-        return cur
-
     lang = user_lang(uid)
-    result = ref.transaction(txn)
-    if result and result.get("status") == "open":
-        await query.answer(t(lang, "dropped"))
-        await query.edit_message_text(query.message.text + "\n\n" + t(lang, "dropped_note"))
-    else:
-        await query.answer(t(lang, "drop_too_late"), show_alert=True)
-
-async def step_picked(update, context):
-    query = update.callback_query
-    oid = query.data.replace("picked_", "")
-    lang = user_lang(str(query.from_user.id))
-    db.reference(f"orders/{oid}").update({"status": "picked", "pickedAt": int(datetime.now().timestamp()*1000)})
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton(
-        t(lang, "btn_done"), callback_data=f"done_{oid}")]])
-    await query.answer()
-    await query.edit_message_text(
-        order_text(db.reference(f"orders/{oid}").get(), lang=lang), reply_markup=kb)
-
-async def step_done(update, context):
-    query = update.callback_query
-    oid = query.data.replace("done_", "")
-    uid = str(query.from_user.id)
-    lang = user_lang(uid)
-    db.reference(f"orders/{oid}").update({"status": "done", "doneAt": int(datetime.now().timestamp()*1000)})
-    db.reference(f"users/{uid}/completedCount").transaction(lambda c: (c or 0) + 1)
-    await query.answer(t(lang, "done_ok"))
-    await query.edit_message_text(query.message.text + "\n\n" + t(lang, "done_note"))
+    ok, order, reason = transition_order(oid, uid, "drop")
+    if not ok:
+        await reject_stale(query, lang, reason, order)
+        return
+    await query.answer(t(lang, "dropped"))
+    await query.edit_message_text(query.message.text + "\n\n" + t(lang, "dropped_note"),
+                                  reply_markup=None)
 
 async def my_orders_volunteer(update, context):
     uid = str(update.effective_user.id)
@@ -1716,7 +1851,11 @@ def on_order_msg(event):
         return
     rlang = user_lang(str(m["toUid"]))
     who = t(rlang, "who_client" if m.get("fromRole") == "client" else "who_volunteer")
-    text = t(rlang, "msg_from", who=who, name=m.get("fromName", "")) + f"\n\n{m.get('text','')}"
+    # Готовая фраза приходит ключом — показываем её на языке получателя.
+    # Свободный текст человека отдаём дословно: переводить чужие слова нельзя.
+    key = m.get("textKey")
+    body = t(rlang, key) if key and key in T[DEFAULT_LANG] else (m.get("text") or "")
+    text = t(rlang, "msg_from", who=who, name=m.get("fromName", "")) + f"\n\n{body}"
     try:
         send_async(int(m["toUid"]), text)
     except (ValueError, TypeError):
@@ -1844,8 +1983,9 @@ def sweep_stale_orders():
             # житель всю ночь думает, что за мусором идут. Уже взятые заявки
             # (taken/arrived/picked) закрытие не трогает, волонтёр их доводит.
             if not is_open_now():
-                db.reference(f"orders/{oid}").update({
-                    "status": "cancelled", "cancelledBy": "schedule"})
+                if not guarded_update(oid, "open", {
+                        "status": "cancelled", "cancelledBy": "schedule"}):
+                    continue          # заявку успели взять — не трогаем
                 log.info(f"заявка {oid} закрыта: сервис не работает")
                 try:
                     clang = user_lang(str(o.get("clientId")))
@@ -1856,7 +1996,9 @@ def sweep_stale_orders():
                     pass
                 continue
             if now - (o.get("createdAt") or now) > orphan_ms:
-                db.reference(f"orders/{oid}").update({"status": "cancelled"})
+                if not guarded_update(oid, "open", {
+                        "status": "cancelled", "cancelledBy": "timeout"}):
+                    continue
                 log.info(f"заявка {oid} закрыта: сутки без волонтёра")
                 try:
                     send_async(int(o.get("clientId")),
@@ -1878,11 +2020,11 @@ def sweep_stale_orders():
         last = max(o.get("pickedAt") or 0, o.get("arrivedAt") or 0,
                    o.get("takenAt") or 0, o.get("createdAt") or 0)
         if now - last > stale_ms:
-            db.reference(f"orders/{oid}").update({
-                "status": "open", "volunteerId": None, "volunteerName": None,
-                "volunteerPhone": None, "takenAt": None, "arrivedAt": None, "pickedAt": None,
-            })
-            log.info(f"заявка {oid} возвращена в общий список: {STALE_MINUTES} мин без движения")
+            if guarded_update(oid, ("taken", "arrived", "picked"), {
+                    "status": "open", "volunteerId": None, "volunteerName": None,
+                    "volunteerPhone": None, "takenAt": None,
+                    "arrivedAt": None, "pickedAt": None}):
+                log.info(f"заявка {oid} возвращена в общий список: {STALE_MINUTES} мин без движения")
 
 def start_stale_sweeper():
     def _run():
