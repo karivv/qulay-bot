@@ -202,6 +202,52 @@ def open_app_kb(role: str):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     user = get_user(uid)
+    arg = context.args[0] if context.args else ""
+
+    # /start vol_КОД должен разбираться ДО ветки "уже зарегистрирован" — иначе
+    # для человека, у которого в users/{uid} уже есть phone (например, он же
+    # раньше зашёл как житель через собственную регистрацию Mini App), код
+    # приглашения молча игнорировался: бот отвечал "с возвращением" тем же
+    # клиентским меню и даже не смотрел на arg. Внешне это выглядело как
+    # прошедшая регистрация — код принят, диалог отработал — а роль в базе
+    # не менялась вообще.
+    if arg.startswith("vol_") or arg == "vol":
+        if user and user.get("role") == "volunteer":
+            await update.message.reply_text(
+                "Вы уже волонтёр — код не нужен.",
+                reply_markup=role_menu("volunteer")
+            )
+            await update.message.reply_text(
+                "Заявки и статус — прямо в приложении:",
+                reply_markup=open_app_kb("volunteer")
+            )
+            return
+        code = arg[4:].strip().upper() if arg.startswith("vol_") else ""
+        if not code or not redeem_invite_code(code, uid, full_name(update.effective_user)):
+            await update.message.reply_text(
+                "Код приглашения недействителен или уже использован.\n"
+                "Чтобы стать волонтёром, попросите новый код у организатора и наберите:\n"
+                "/start vol_КОД"
+            )
+            return
+        if user and user.get("phone"):
+            # человек уже отвечал на телефон/имя раньше (как житель) — второй
+            # раз не переспрашиваем, нужен только район, которого у жителя нет
+            db.reference(f"users/{uid}/pendingUpgradeRole").set("volunteer")
+            await update.message.reply_text(
+                "Код принят! Теперь вы волонтёр — история ваших заявок как жителя "
+                "никуда не денется, просто интерфейс переключится на волонтёрский.\n\n"
+                "В каком районе/махалле вы обычно будете волонтёрить?"
+            )
+            return
+        db.reference(f"users/{uid}/pendingRole").set("volunteer")
+        await update.message.reply_text(
+            "Привет! Это Qulay — вывоз мусора с помощью волонтёров.\n\n"
+            "Поделитесь номером, чтобы продолжить:",
+            reply_markup=phone_kb()
+        )
+        return
+
     if user and user.get("phone"):
         role = user.get("role", "client")
         await update.message.reply_text(
@@ -213,24 +259,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=open_app_kb(role)
         )
         return
-    # /start vol_КОД  -> регистрация волонтёром, но только по действующему коду приглашения
     # /start ref_UID  -> пришёл по ссылке жителя, запомним кто пригласил
-    arg = context.args[0] if context.args else ""
     pending_role = "client"
     if arg.startswith("ref_"):
         inviter = arg[4:].strip()
         if inviter and inviter != uid:
             db.reference(f"users/{uid}/pendingRef").set(inviter)
-    if arg.startswith("vol_") or arg == "vol":
-        code = arg[4:].strip().upper() if arg.startswith("vol_") else ""
-        if code and redeem_invite_code(code, uid, full_name(update.effective_user)):
-            pending_role = "volunteer"
-        else:
-            await update.message.reply_text(
-                "Код приглашения недействителен или уже использован.\n"
-                "Чтобы стать волонтёром, попросите новый код у организатора и наберите:\n"
-                "/start vol_КОД"
-            )
     db.reference(f"users/{uid}/pendingRole").set(pending_role)
     await update.message.reply_text(
         "Привет! Это Qulay — вывоз мусора с помощью волонтёров.\n\n"
@@ -884,6 +918,37 @@ async def contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
+
+    # Апгрейд существующего жителя до волонтёра по уже погашенному в start()
+    # коду — имя и телефон у него есть, спрашиваем только район. Проверяем
+    # это раньше pendingPhone: у такого человека pendingPhone всегда пуст
+    # (он уже зарегистрирован), и без этой проверки его ответ на вопрос
+    # о районе принял бы за случайное сообщение боту.
+    pending_upgrade = db.reference(f"users/{uid}/pendingUpgradeRole").get()
+    if pending_upgrade == "volunteer":
+        district = update.message.text.strip()
+        if len(district) < 1:
+            await update.message.reply_text("Напишите хотя бы коротко.")
+            return
+        u = get_user(uid) or {}
+        db.reference(f"users/{uid}").update({
+            "role": "volunteer", "district": district,
+            "onair": False, "verifiedAt": int(datetime.now().timestamp() * 1000),
+        })
+        db.reference(f"users/{uid}/pendingUpgradeRole").delete()
+        db.reference(f"leaderboard/{uid}").update({
+            "name": u.get("name", ""), "role": "volunteer", "district": district,
+        })
+        await update.message.reply_text(
+            f"Готово! Теперь вы волонтёр в районе «{district}».",
+            reply_markup=role_menu("volunteer")
+        )
+        await update.message.reply_text(
+            "Открывайте заявки прямо здесь:",
+            reply_markup=open_app_kb("volunteer")
+        )
+        return
+
     pending_phone = db.reference(f"users/{uid}/pendingPhone").get()
     if not pending_phone:
         # не регистрация — но, может быть, идёт разговор с организатором.
