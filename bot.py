@@ -198,6 +198,7 @@ T = {
     "admin_cancelled": "❌ Организатор отменил заявку.",
     "code_ready": "✅ Код для {name} готов.\nПерешлите ему эту ссылку:\n{link}",
     "code_declined": "Организатор пока не выдал код для {name}.",
+    "your_id": "Ваш Telegram ID: `{id}`",
 },
 "uz": {
     "lang_saved": "Tayyor! Til — o‘zbekcha.",
@@ -309,6 +310,7 @@ T = {
     "admin_cancelled": "❌ Tashkilotchi buyurtmani bekor qildi.",
     "code_ready": "✅ {name} uchun kod tayyor.\nUnga shu havolani yuboring:\n{link}",
     "code_declined": "Tashkilotchi hozircha {name} uchun kod bermadi.",
+    "your_id": "Telegram ID raqamingiz: `{id}`",
 },
 }
 
@@ -594,7 +596,9 @@ async def classic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def myid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Ваш Telegram ID: `{update.effective_user.id}`", parse_mode="Markdown")
+    uid = str(update.effective_user.id)
+    await update.message.reply_text(
+        t(user_lang(uid), "your_id", id=uid), parse_mode="Markdown")
 
 async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
